@@ -84,9 +84,40 @@ mod imp {
         }
     }
 
-    /// Gives ccnap's own pages back to Windows while it waits; they fault back in on wake.
+    /// Gives hibernaut's own pages back to Windows while it waits; they fault back in on wake.
     pub fn trim_self() {
         unsafe { K32EmptyWorkingSet(GetCurrentProcess()) };
+    }
+
+    /// When the process started, in unix ms.
+    pub fn started_ms(pid: u32) -> Option<u64> {
+        use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let (mut created, mut a, mut b, mut c): (FILETIME, FILETIME, FILETIME, FILETIME) = (zeroed(), zeroed(), zeroed(), zeroed());
+            let ok = GetProcessTimes(h, &mut created, &mut a, &mut b, &mut c);
+            CloseHandle(h);
+            let ft = (created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64;
+            // FILETIME counts 100 ns steps from 1601.
+            (ok != 0).then(|| (ft / 10_000).saturating_sub(11_644_473_600_000))
+        }
+    }
+
+    /// Ends one process with `code` as its exit code.
+    pub fn terminate(pid: u32, code: u32) -> bool {
+        use windows_sys::Win32::System::Threading::{TerminateProcess, PROCESS_TERMINATE};
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let ok = TerminateProcess(h, code);
+            CloseHandle(h);
+            ok != 0
+        }
     }
 }
 
@@ -153,6 +184,19 @@ mod imp {
 
 use imp::rss;
 pub use imp::{list, trim_self};
+#[cfg(windows)]
+pub use imp::{started_ms, terminate};
+
+/// Ends `root` and everything it started: a leftover claude along with its MCP servers.
+pub fn end_tree(root: u32) {
+    #[cfg(windows)]
+    crate::term::kill_tree(root, true);
+    #[cfg(unix)]
+    for pid in tree(&list(), root).into_iter().rev() {
+        // SIGTERM, so claude can shut its servers down itself.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+}
 
 #[cfg(test)]
 mod tests {

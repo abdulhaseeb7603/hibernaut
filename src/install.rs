@@ -1,8 +1,8 @@
-//! `ccnap setup` routes every way Claude Code starts through ccnap; `ccnap uninstall` undoes it.
+//! `hibernaut setup` routes every way Claude Code starts through Hibernaut; `hibernaut uninstall` undoes it.
 //! - The chat panel of VS Code-family editors: `claudeCode.claudeProcessWrapper` in each
-//!   editor's user settings points at ccnap, which the extension then runs in place of claude.
-//! - Terminals, the extensions' terminal mode, JetBrains: a `claude` that is really ccnap goes
-//!   first on PATH. ccnap finds the real claude by skipping that directory.
+//!   editor's user settings points at hibernaut, which the extension then runs in place of claude.
+//! - Terminals, the extensions' terminal mode, JetBrains: a `claude` that is really hibernaut goes
+//!   first on PATH. hibernaut finds the real claude by skipping that directory.
 
 use std::{
     env, fs, io,
@@ -26,16 +26,52 @@ const EDITORS: &[(&str, Option<&str>)] = &[
 ];
 const EXE: &str = env::consts::EXE_SUFFIX;
 
-/// Where ccnap installs itself: %LOCALAPPDATA%\ccnap or ~/.ccnap.
+/// Where hibernaut installs itself: %LOCALAPPDATA%\hibernaut or ~/.hibernaut.
 pub fn home() -> PathBuf {
-    if let Some(h) = env::var_os("CCNAP_HOME") {
+    if let Some(h) = env::var_os("HIBERNAUT_HOME") {
         return h.into();
     }
+    named_home("hibernaut")
+}
+
+fn named_home(name: &str) -> PathBuf {
     if cfg!(windows) {
-        env::var_os("LOCALAPPDATA").map_or_else(|| user_home().join("AppData").join("Local"), PathBuf::from).join("ccnap")
+        env::var_os("LOCALAPPDATA").map_or_else(|| user_home().join("AppData").join("Local"), PathBuf::from).join(name)
     } else {
-        user_home().join(".ccnap")
+        user_home().join(format!(".{name}"))
     }
+}
+
+/// hibernaut's old name. Installs and sessions from then are moved over.
+// ponytail: drop the legacy handling once ccnap installs are gone.
+pub const LEGACY: &str = "ccnap";
+
+/// The old install, unless a home of its own was chosen (as tests do).
+pub fn legacy_home() -> Option<PathBuf> {
+    env::var_os("HIBERNAUT_HOME").is_none().then(|| named_home(LEGACY))
+}
+
+/// Takes over from a ccnap install, once: its settings, its place on PATH and at login, and its
+/// tray icon. Its sessions keep running and move over like any older session.
+fn take_over_legacy() -> io::Result<()> {
+    let Some(old) = legacy_home() else { return Ok(()) };
+    let settings = old.join("config.toml");
+    if !settings.is_file() {
+        return Ok(());
+    }
+    if !crate::config::path().exists() {
+        fs::copy(&settings, crate::config::path())?;
+    }
+    fs::rename(&settings, old.join("config.toml.moved"))?;
+    #[cfg(windows)]
+    path::remove(&old.join("bin"))?;
+    #[cfg(unix)]
+    path::remove_legacy()?;
+    login::remove_legacy();
+    stop_tray_in(&env::temp_dir().join(LEGACY), "ccnap-tray");
+    println!("ccnap is now hibernaut: its settings moved over, and the old one is off PATH. Its open sessions move over too.");
+    println!("Once they have, you can delete {}.", old.display());
+    Ok(())
 }
 
 pub fn bin_dir() -> PathBuf {
@@ -55,12 +91,13 @@ pub fn setup() -> io::Result<()> {
     let bin = bin_dir();
     fs::create_dir_all(&bin)?;
     sweep_old(&bin);
-    let exe = bin.join(format!("ccnap{EXE}"));
+    take_over_legacy()?;
+    let exe = bin.join(format!("hibernaut{EXE}"));
     let me = env::current_exe()?;
     if fs::canonicalize(&me).ok() != fs::canonicalize(&exe).ok() {
         replace(&me, &exe)?;
     }
-    println!("ccnap installed at {}", exe.display());
+    println!("Hibernaut installed at {}", exe.display());
 
     let shim = bin.join(format!("claude{EXE}"));
     #[cfg(unix)]
@@ -71,11 +108,11 @@ pub fn setup() -> io::Result<()> {
     #[cfg(windows)]
     replace(&exe, &shim)?;
     path::add(&bin)?;
-    println!("terminals: `claude` now runs through ccnap ({})", shim.display());
+    println!("terminals: `claude` now runs through Hibernaut ({})", shim.display());
     #[cfg(windows)]
     for dir in path::claude_ahead() {
         println!(
-            "warning: {} has a claude too, and Windows puts system PATH folders ahead of yours, so terminals run that one, not ccnap. Remove it there, or run `ccnap` instead of `claude`.",
+            "warning: {} has a claude too, and Windows puts system PATH folders ahead of yours, so terminals run that one, not Hibernaut. Remove it there, or run `hibernaut` instead of `claude`.",
             dir.display()
         );
     }
@@ -96,15 +133,215 @@ pub fn setup() -> io::Result<()> {
         fs::write(&cfg, crate::config::TEMPLATE)?;
     }
     println!("settings: {} (idle time, memory limit, excluded folders)", cfg.display());
-    println!("Done. New editor chat tabs use ccnap right away; open a new terminal (or restart the editor) for `claude`.");
+    println!("Done. New editor chat tabs use Hibernaut right away; open a new terminal (or restart the editor) for `claude`.");
     let old = crate::status::outdated_count();
     if old > 0 {
-        println!("{old} open session{} still run the previous ccnap. {}", if old == 1 { "" } else { "s" }, crate::status::UPDATE_HINT);
+        println!("{old} open session{} still run the previous version. {}", if old == 1 { "" } else { "s" }, crate::status::UPDATE_HINT);
+    }
+    if cfg!(any(windows, target_os = "macos")) {
+        setup_tray()?;
     }
     Ok(())
 }
 
+/// Installs the tray icon next to hibernaut, has it start at login, and starts it now, replacing
+/// one that is already running so it shows this version.
+fn setup_tray() -> io::Result<()> {
+    let dst = tray_exe();
+    let beside_me = env::current_exe()?.with_file_name(dst.file_name().unwrap());
+    let src = if beside_me.is_file() { beside_me } else { dst.clone() };
+    if !src.is_file() {
+        println!("tray: hibernaut-tray wasn't found next to hibernaut, so there's no tray icon");
+        return Ok(());
+    }
+    stop_tray();
+    if fs::canonicalize(&src).ok() != fs::canonicalize(&dst).ok() {
+        replace(&src, &dst)?;
+    }
+    login::set(Some(&dst))?;
+    start_tray(&dst)?;
+    println!("tray: the Hibernaut icon is by the clock, and starts at login (turn that off in its menu)");
+    Ok(())
+}
+
+pub fn tray_exe() -> PathBuf {
+    bin_dir().join(format!("hibernaut-tray{EXE}"))
+}
+
+/// The running tray icon's heartbeat: its pid, rewritten every few seconds.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub fn tray_heartbeat() -> PathBuf {
+    crate::temp_dir().join("tray.json")
+}
+
+/// Written to ask the running tray icon to quit.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub fn tray_quit() -> PathBuf {
+    crate::temp_dir().join("tray.quit")
+}
+
+fn stop_tray() -> bool {
+    stop_tray_in(&crate::temp_dir(), "hibernaut-tray")
+}
+
+/// Ends the tray icon whose heartbeat is in `dir`, if it runs. It's asked to quit first: one
+/// ended by force leaves a dead icon by the clock until the pointer passes over it.
+fn stop_tray_in(dir: &Path, program: &str) -> bool {
+    let Some(pid) = tray_pid_in(dir, program) else { return false };
+    let _ = fs::write(dir.join("tray.quit"), "");
+    for _ in 0..50 {
+        if tray_pid_in(dir, program).is_none() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    crate::proc::end_tree(pid);
+    let _ = fs::remove_file(dir.join("tray.json"));
+    let _ = fs::remove_file(dir.join("tray.quit"));
+    true
+}
+
+/// The pid of a tray icon that is running now.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub fn tray_pid() -> Option<u32> {
+    tray_pid_in(&crate::temp_dir(), "hibernaut-tray")
+}
+
+fn tray_pid_in(dir: &Path, program: &str) -> Option<u32> {
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("tray.json")).ok()?).ok()?;
+    let fresh = crate::now_ms().saturating_sub(v["updated"].as_u64()?) < 10_000;
+    let pid = fresh.then(|| v["pid"].as_u64()).flatten()? as u32;
+    // A tray that was just ended leaves a fresh heartbeat behind.
+    crate::proc::list().iter().any(|p| p.pid == pid && p.name.starts_with(program)).then_some(pid)
+}
+
+pub fn start_tray(exe: &Path) -> io::Result<()> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x8;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn().map(drop)
+}
+
+/// Starting the tray icon at login.
+#[cfg(windows)]
+pub mod login {
+    use std::{io, path::Path, ptr};
+    use windows_sys::Win32::{Foundation::*, System::Registry::*};
+
+    const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain([0]).collect()
+    }
+
+    pub fn enabled() -> bool {
+        let mut size = 0u32;
+        let code = unsafe {
+            RegGetValueW(HKEY_CURRENT_USER, wide(RUN).as_ptr(), wide("hibernaut").as_ptr(), RRF_RT_REG_SZ, ptr::null_mut(), ptr::null_mut(), &mut size)
+        };
+        code == ERROR_SUCCESS
+    }
+
+    pub fn set(tray: Option<&Path>) -> io::Result<()> {
+        set_value("hibernaut", tray)
+    }
+
+    pub fn remove_legacy() {
+        let _ = set_value(super::LEGACY, None);
+    }
+
+    fn set_value(name: &str, tray: Option<&Path>) -> io::Result<()> {
+        let name = wide(name);
+        let code = unsafe {
+            let mut key = ptr::null_mut();
+            let code = RegOpenKeyExW(HKEY_CURRENT_USER, wide(RUN).as_ptr(), 0, KEY_SET_VALUE, &mut key);
+            if code != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(code as i32));
+            }
+            let code = match tray {
+                Some(exe) => {
+                    let data = wide(&format!("\"{}\"", exe.display()));
+                    RegSetValueExW(key, name.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), (data.len() * 2) as u32)
+                }
+                None => match RegDeleteValueW(key, name.as_ptr()) {
+                    ERROR_FILE_NOT_FOUND => ERROR_SUCCESS,
+                    c => c,
+                },
+            };
+            RegCloseKey(key);
+            code
+        };
+        if code == ERROR_SUCCESS { Ok(()) } else { Err(io::Error::from_raw_os_error(code as i32)) }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub mod login {
+    use std::{fs, io, path::Path, path::PathBuf};
+
+    fn agent() -> PathBuf {
+        super::user_home().join("Library").join("LaunchAgents").join("dev.hibernaut.tray.plist")
+    }
+
+    pub fn remove_legacy() {
+        let _ = fs::remove_file(super::user_home().join("Library").join("LaunchAgents").join("dev.ccnap.tray.plist"));
+    }
+
+    pub fn enabled() -> bool {
+        agent().is_file()
+    }
+
+    pub fn set(tray: Option<&Path>) -> io::Result<()> {
+        let Some(exe) = tray else {
+            return match fs::remove_file(agent()) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            };
+        };
+        let exe = exe.display().to_string().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>dev.hibernaut.tray</string>
+    <key>ProgramArguments</key><array><string>{exe}</string></array>
+    <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+"#
+        );
+        fs::create_dir_all(agent().parent().unwrap())?;
+        fs::write(agent(), plist)
+    }
+}
+
+/// No tray icon here yet, so nothing to start at login.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub mod login {
+    pub fn set(_tray: Option<&std::path::Path>) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    pub fn remove_legacy() {}
+}
+
 pub fn uninstall() -> io::Result<()> {
+    login::set(None)?;
+    if stop_tray() {
+        println!("tray: icon removed");
+    }
     for (name, file) in editor_settings() {
         let Ok(text) = fs::read_to_string(&file) else { continue };
         if jsonc::get_string(&text, WRAPPER_KEY).is_some_and(|v| is_ours(&v)) {
@@ -116,20 +353,22 @@ pub fn uninstall() -> io::Result<()> {
     }
     let bin = bin_dir();
     path::remove(&bin)?;
-    match fs::remove_file(bin.join(format!("claude{EXE}"))) {
+    // One still running in an open terminal can't be deleted, only moved out of the way.
+    let shim = bin.join(format!("claude{EXE}"));
+    match fs::remove_file(&shim).or_else(|_| fs::rename(&shim, shim.with_extension(format!("old{}", std::process::id())))) {
         Ok(()) => println!("terminals: `claude` is Claude Code again"),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => println!("couldn't remove the claude shim ({e}); close running sessions and retry"),
     }
-    println!("ccnap itself is still in {}; delete that folder to remove it.", home().display());
+    println!("hibernaut itself is still in {}; delete that folder to remove it.", home().display());
     Ok(())
 }
 
 fn is_ours(wrapper: &str) -> bool {
-    Path::new(wrapper).file_stem().is_some_and(|s| s.eq_ignore_ascii_case("ccnap"))
+    Path::new(wrapper).file_stem().is_some_and(|s| s.eq_ignore_ascii_case("hibernaut") || s.eq_ignore_ascii_case(LEGACY))
 }
 
-/// Points one editor's Claude Code extension at ccnap, unless it already uses another wrapper.
+/// Points one editor's Claude Code extension at hibernaut, unless it already uses another wrapper.
 fn set_wrapper(file: &Path, exe: &Path) -> io::Result<String> {
     let text = match fs::read_to_string(file) {
         Ok(text) => text,
@@ -138,7 +377,7 @@ fn set_wrapper(file: &Path, exe: &Path) -> io::Result<String> {
     };
     let exe = exe.to_string_lossy();
     match jsonc::get_string(&text, WRAPPER_KEY) {
-        Some(v) if v == exe => return Ok("chat panel already uses ccnap".into()),
+        Some(v) if v == exe => return Ok("chat panel already uses Hibernaut".into()),
         Some(v) if !is_ours(&v) => return Ok(format!("left alone: {WRAPPER_KEY} already runs {v}")),
         _ => {}
     }
@@ -146,7 +385,7 @@ fn set_wrapper(file: &Path, exe: &Path) -> io::Result<String> {
         return Ok(format!("skipped: couldn't read {}", file.display()));
     };
     fs::write(file, new)?;
-    Ok("chat panel now runs through ccnap".into())
+    Ok("chat panel now runs through Hibernaut".into())
 }
 
 /// (name, settings.json) for each VS Code-family editor with a user profile on this machine, and
@@ -196,17 +435,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn points_editors_at_ccnap_but_respects_other_wrappers() {
-        let dir = env::temp_dir().join(format!("ccnap-setup-test-{}", std::process::id()));
+    fn points_editors_at_hibernaut_but_respects_other_wrappers() {
+        let dir = env::temp_dir().join(format!("hibernaut-setup-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let (file, exe) = (dir.join("settings.json"), dir.join("ccnap.exe"));
+        let (file, exe) = (dir.join("settings.json"), dir.join("hibernaut.exe"));
         let original = "// mine\n{\n    \"editor.fontSize\": 14,\n}\n";
         fs::write(&file, original).unwrap();
-        assert_eq!(set_wrapper(&file, &exe).unwrap(), "chat panel now runs through ccnap");
-        assert_eq!(set_wrapper(&file, &exe).unwrap(), "chat panel already uses ccnap");
+        assert_eq!(set_wrapper(&file, &exe).unwrap(), "chat panel now runs through Hibernaut");
+        assert_eq!(set_wrapper(&file, &exe).unwrap(), "chat panel already uses Hibernaut");
         let text = fs::read_to_string(&file).unwrap();
         assert_eq!(jsonc::get_string(&text, WRAPPER_KEY).as_deref(), Some(&*exe.to_string_lossy()));
         assert_eq!(jsonc::remove(&text, WRAPPER_KEY).unwrap(), original);
+
+        // One pointing at ccnap, hibernaut's old name, is taken over.
+        fs::write(&file, "{ \"claudeCode.claudeProcessWrapper\": \"/old/bin/ccnap\" }").unwrap();
+        assert_eq!(set_wrapper(&file, &exe).unwrap(), "chat panel now runs through Hibernaut");
 
         let theirs = "{ \"claudeCode.claudeProcessWrapper\": \"/opt/other\" }";
         fs::write(&file, theirs).unwrap();
@@ -382,11 +625,11 @@ mod jsonc {
         #[test]
         fn edits_keep_everything_else() {
             let text = "// my settings\n{\n    \"editor.fontSize\": 14, // big\n    \"a\": {\"b\": [1, \"}\"]},\n}\n";
-            let set = set_string(text, K, r"C:\x\ccnap.exe").unwrap();
-            assert_eq!(get_string(&set, K).as_deref(), Some(r"C:\x\ccnap.exe"));
+            let set = set_string(text, K, r"C:\x\hibernaut.exe").unwrap();
+            assert_eq!(get_string(&set, K).as_deref(), Some(r"C:\x\hibernaut.exe"));
             assert!(set.contains("\"editor.fontSize\": 14, // big"));
-            let again = set_string(&set, K, "/y/ccnap").unwrap();
-            assert_eq!(get_string(&again, K).as_deref(), Some("/y/ccnap"));
+            let again = set_string(&set, K, "/y/hibernaut").unwrap();
+            assert_eq!(get_string(&again, K).as_deref(), Some("/y/hibernaut"));
             assert_eq!(again.matches(K).count(), 1);
             assert_eq!(remove(&again, K).unwrap(), text);
         }
@@ -405,14 +648,14 @@ mod jsonc {
     }
 }
 
-/// Putting ccnap's bin directory first on PATH.
+/// Putting hibernaut's bin directory first on PATH.
 #[cfg(unix)]
 mod path {
     use super::user_home;
     use std::{env, fs, io, path::Path};
 
-    const START: &str = "# >>> ccnap >>>";
-    const END: &str = "# <<< ccnap <<<";
+    const START: &str = "# >>> hibernaut >>>";
+    const END: &str = "# <<< hibernaut <<<";
 
     /// Shell startup files to edit, with the line each needs.
     fn files(bin: &Path) -> Vec<(std::path::PathBuf, String)> {
@@ -433,7 +676,7 @@ mod path {
         }
         let fish = home.join(".config").join("fish");
         if shell.ends_with("fish") || fish.exists() {
-            out.push((fish.join("conf.d").join("ccnap.fish"), format!("set -gx PATH \"{}\" $PATH", bin.display())));
+            out.push((fish.join("conf.d").join("hibernaut.fish"), format!("set -gx PATH \"{}\" $PATH", bin.display())));
         }
         out
     }
@@ -460,9 +703,24 @@ mod path {
             let Ok(text) = fs::read_to_string(&f) else { continue };
             if text.contains(START) {
                 fs::write(&f, strip(&text))?;
-                println!("PATH: removed ccnap from {}", f.display());
+                println!("PATH: removed hibernaut from {}", f.display());
             }
         }
+        Ok(())
+    }
+
+    /// Takes out the block a ccnap install, hibernaut's old name, put in the startup files.
+    pub fn remove_legacy() -> io::Result<()> {
+        let home = user_home();
+        for name in [".bashrc", ".zshrc", ".bash_profile", ".profile"] {
+            let f = home.join(name);
+            let Ok(text) = fs::read_to_string(&f) else { continue };
+            let new = strip_between(&text, "# >>> ccnap >>>", "# <<< ccnap <<<");
+            if new != text {
+                fs::write(&f, new)?;
+            }
+        }
+        let _ = fs::remove_file(home.join(".config").join("fish").join("conf.d").join("ccnap.fish"));
         Ok(())
     }
 
@@ -473,8 +731,12 @@ mod path {
 
     /// `text` without our block.
     fn strip(text: &str) -> String {
-        match (text.find(START), text.find(END)) {
-            (Some(s), Some(e)) if s < e => format!("{}{}", &text[..s], text[e + END.len()..].trim_start_matches('\n')),
+        strip_between(text, START, END)
+    }
+
+    fn strip_between(text: &str, start: &str, end: &str) -> String {
+        match (text.find(start), text.find(end)) {
+            (Some(s), Some(e)) if s < e => format!("{}{}", &text[..s], text[e + end.len()..].trim_start_matches('\n')),
             _ => text.to_string(),
         }
     }
@@ -486,16 +748,16 @@ mod path {
         #[test]
         fn profile_block_round_trip() {
             let rc = "alias ll='ls -l'\nexport PATH=\"$HOME/.local/bin:$PATH\"\n";
-            let added = with_block(rc, "export PATH=\"/h/.ccnap/bin:$PATH\"");
-            assert!(added.ends_with("export PATH=\"/h/.ccnap/bin:$PATH\"\n# <<< ccnap <<<\n"));
-            assert_eq!(with_block(&added, "export PATH=\"/h/.ccnap/bin:$PATH\""), added);
+            let added = with_block(rc, "export PATH=\"/h/.hibernaut/bin:$PATH\"");
+            assert!(added.ends_with("export PATH=\"/h/.hibernaut/bin:$PATH\"\n# <<< hibernaut <<<\n"));
+            assert_eq!(with_block(&added, "export PATH=\"/h/.hibernaut/bin:$PATH\""), added);
             assert_eq!(strip(&added), rc);
             assert_eq!(strip(&with_block("", "x")), "");
         }
     }
 }
 
-/// Putting ccnap's bin directory first on the user PATH in the registry.
+/// Putting hibernaut's bin directory first on the user PATH in the registry.
 #[cfg(windows)]
 mod path {
     use std::{
@@ -538,7 +800,7 @@ mod path {
     }
 
     /// System PATH folders that hold a claude. Windows puts the system PATH ahead of each
-    /// user's, so that claude runs in place of ccnap's.
+    /// user's, so that claude runs in place of hibernaut's.
     pub fn claude_ahead() -> Vec<PathBuf> {
         env::split_paths(&system_path())
             .filter(|d| ["claude.exe", "claude.cmd"].iter().any(|n| d.join(n).is_file()))
@@ -605,7 +867,7 @@ mod path {
 
         #[test]
         fn path_entries() {
-            let d = r"C:\Users\u\AppData\Local\ccnap\bin";
+            let d = r"C:\Users\u\AppData\Local\hibernaut\bin";
             assert_eq!(with_entry(r"%USERPROFILE%\.local\bin;C:\x", d, true).unwrap(), format!(r"{d};%USERPROFILE%\.local\bin;C:\x"));
             assert_eq!(with_entry(&format!(r"{d};C:\x"), d, true), None);
             assert_eq!(with_entry(&format!(r"C:\x;{d}\"), d, true).unwrap(), format!(r"{d};C:\x"));
@@ -622,7 +884,7 @@ mod path {
         #[test]
         fn registry_round_trip() {
             // A scratch value, so the real PATH is never touched by tests.
-            let name = format!("CcnapTest{}", std::process::id());
+            let name = format!("HibernautTest{}", std::process::id());
             edit(&name, |p| with_entry(p, r"C:\a", true)).unwrap();
             edit(&name, |p| with_entry(p, r"C:\b", true)).unwrap();
             let mut seen = String::new();

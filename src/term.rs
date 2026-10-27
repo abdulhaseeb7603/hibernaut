@@ -14,18 +14,46 @@ pub fn is_tty() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
+#[cfg(windows)]
+static STOP_READER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Sends each chunk of keyboard input, then `None` when the terminal goes away.
-pub fn spawn_reader(tx: Sender<Option<Vec<u8>>>) {
+pub fn spawn_reader(tx: Sender<Option<Vec<u8>>>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut input = imp::Input::default();
         loop {
             let got = input.read();
+            #[cfg(windows)]
+            if STOP_READER.load(std::sync::atomic::Ordering::Relaxed) {
+                // Keys typed just before the stop still go to whoever stopped it.
+                if let Some(b) = got {
+                    let _ = tx.send(Some(String::from_utf8_lossy(&b).replace('\u{FFFF}', "").into_bytes()));
+                }
+                break;
+            }
             let eof = got.is_none();
             if tx.send(got).is_err() || eof {
                 break;
             }
         }
-    });
+    })
+}
+
+/// Stops the reader from taking any more keys, so another program can read the console.
+/// Cancelling its read can hang inside ConPTY, so it gets a key nobody types to wake it, and
+/// stops there.
+#[cfg(windows)]
+pub fn stop_reader(reader: &thread::JoinHandle<()>) {
+    use std::time::{Duration, Instant};
+    STOP_READER.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Err(e) = imp::press('\u{FFFF}') {
+        crate::log(format_args!("couldn't stop reading keys: {e}"));
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !reader.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[cfg(unix)]
@@ -200,6 +228,33 @@ mod imp {
                 }
             }
         }
+    }
+
+    /// Puts a key press into this console's input, as if typed.
+    pub fn press(c: char) -> io::Result<()> {
+        use std::{fs::OpenOptions, os::windows::io::AsRawHandle};
+        let input = OpenOptions::new().read(true).write(true).open("CONIN$")?;
+        let mut unit = [0u16; 2];
+        c.encode_utf16(&mut unit);
+        let key = |down: bool| INPUT_RECORD {
+            EventType: KEY_EVENT as u16,
+            Event: INPUT_RECORD_0 {
+                KeyEvent: KEY_EVENT_RECORD {
+                    bKeyDown: down as i32,
+                    wRepeatCount: 1,
+                    wVirtualKeyCode: 0,
+                    wVirtualScanCode: 0,
+                    uChar: KEY_EVENT_RECORD_0 { UnicodeChar: unit[0] },
+                    dwControlKeyState: 0,
+                },
+            },
+        };
+        let records = [key(true), key(false)];
+        let mut written = 0;
+        if unsafe { WriteConsoleInputW(input.as_raw_handle() as _, records.as_ptr(), 2, &mut written) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub fn kill_tree(pid: u32, _force: bool) {

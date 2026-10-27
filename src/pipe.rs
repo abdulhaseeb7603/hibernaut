@@ -1,12 +1,16 @@
 //! Pipe mode, for the chat panel of VS Code-family editors. With `claudeCode.claudeProcessWrapper`
-//! pointing at ccnap, the extension's Agent SDK runs `ccnap <claude> --input-format stream-json
-//! ...` and talks JSON lines over stdin and stdout. ccnap relays every line unchanged. Once the
+//! pointing at hibernaut, the extension's Agent SDK runs `hibernaut <claude> --input-format stream-json
+//! ...` and talks JSON lines over stdin and stdout. hibernaut relays every line unchanged. Once the
 //! session has been idle long enough it closes claude's input, the way the SDK ends a session,
 //! so claude shuts down and frees its memory. The next line from the SDK wakes it: claude starts
 //! again with `--resume`, and the setup the SDK sent the first time (initialize, then model,
 //! permission mode and the like) is replayed into it. The SDK never sees the swap.
 
-use crate::{args, config, hook, log, now_ms, proc, session_cwd, status, term, Files, REARM_AFTER_MS};
+use crate::{
+    args, config,
+    control::{self, Action},
+    hook, log, now_ms, proc, session_cwd, status, term, Files, REARM_AFTER_MS,
+};
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
@@ -25,8 +29,8 @@ const REPLAY: &[&str] = &[
     "set_model", "set_permission_mode", "set_max_thinking_tokens",
     "set_mcp_permission_mode_override", "select_chrome_browser", "apply_flag_settings", "mcp_toggle",
 ];
-/// Request ids ccnap uses for replays; their answers are not passed on.
-const OWN_ID: &str = "ccnap-";
+/// Request ids hibernaut uses for replays; their answers are not passed on.
+const OWN_ID: &str = "hibernaut-";
 /// A session past the memory limit naps after this much quiet instead of the full idle time.
 const RECYCLE_QUIET_MS: u64 = 60_000;
 
@@ -94,6 +98,7 @@ pub fn run(claude: PathBuf, toks: Vec<args::Tok>, files: Files) -> io::Result<i3
     // Memory of claude's process tree; what the last nap freed; whether a nap for memory may
     // happen, and when a sample may allow one again after one (see REARM_AFTER_MS).
     let (mut memory, mut freed, mut armed, mut rearm_at) = (0u64, 0u64, true, 0u64);
+    let mut last_action = Value::Null;
     loop {
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Ev::In(Some(line))) => {
@@ -147,6 +152,35 @@ pub fn run(claude: PathBuf, toks: Vec<args::Tok>, files: Files) -> io::Result<i3
                 return Ok(exit.code().unwrap_or(1));
             }
         }
+        // A request from the tray or `hibernaut nap|wake|restart`: no waiting for idle time, but
+        // the same checks as any nap, so nothing in flight is lost.
+        if let Some(action) = control::take() {
+            let result = match (action, live.is_some()) {
+                (Action::Nap | Action::Restart, true) => match p.blocker(&st, now, 0) {
+                    Some(why) => format!("not now: {why}"),
+                    None => {
+                        (freed, since) = (memory, now);
+                        p.nap(live.take().unwrap());
+                        if action == Action::Restart {
+                            live = Some(p.wake(&st)?);
+                            (memory, p.last_activity) = (0, now);
+                            "restarted".into()
+                        } else {
+                            format!("napped, {} freed", status::size(freed))
+                        }
+                    }
+                },
+                (Action::Nap, false) => "already napping".into(),
+                (Action::Wake | Action::Restart, false) => {
+                    live = Some(p.wake(&st)?);
+                    (p.last_activity, since) = (now, now);
+                    "woke".into()
+                }
+                (Action::Wake, true) => "already awake".into(),
+            };
+            log(format_args!("{} requested: {result}", action.name()));
+            last_action = control::outcome(action, &result, now);
+        }
         let cwd = session_cwd(&st, &p.cwd);
         let pid = live.as_ref().map(|l| l.child.id());
         let mut why = None;
@@ -175,6 +209,13 @@ pub fn run(claude: PathBuf, toks: Vec<args::Tok>, files: Files) -> io::Result<i3
                 p.nap(live.take().unwrap());
             }
         }
+        // A newer hibernaut was installed. While napping nothing runs, so step aside: a clean exit
+        // is how a session ends, the extension closes it quietly, and its next message starts
+        // the session again through the new hibernaut.
+        if live.is_none() && status.replaced() {
+            log("a newer hibernaut is installed; handing the session over to it");
+            return Ok(0);
+        }
         let napping = live.is_none();
         status.update(
             now,
@@ -182,7 +223,7 @@ pub fn run(claude: PathBuf, toks: Vec<args::Tok>, files: Files) -> io::Result<i3
                 "pid": std::process::id(), "mode": "panel", "napping": napping,
                 "why": if napping { None } else { why }, "claude_pid": pid, "since": since,
                 "memory": if napping { 0 } else { memory }, "freed": freed,
-                "cwd": cwd, "session": st.session_id,
+                "cwd": cwd, "session": st.session_id, "last_action": last_action,
             }),
         );
     }
@@ -195,7 +236,7 @@ impl Pipe {
         let mut cmd = Command::new(&self.claude);
         cmd.args(argv)
             .current_dir(cwd)
-            .env("CCNAP_STATE", &self.files.state)
+            .env("HIBERNAUT_STATE", &self.files.state)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());

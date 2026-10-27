@@ -14,7 +14,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cargo test --locked
 
   release:
@@ -32,7 +32,7 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: rustup target add ${{ matrix.target }}
@@ -40,7 +40,11 @@ jobs:
       - shell: bash
         run: |
           ext=""; [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
-          cp "target/${{ matrix.target }}/release/ccnap$ext" "ccnap-${{ matrix.target }}$ext"
+          cp "target/${{ matrix.target }}/release/hibernaut$ext" "hibernaut-${{ matrix.target }}$ext"
+          # The tray icon is for Windows and macOS for now.
+          [[ "${{ matrix.target }}" == *linux* ]] || cp "target/${{ matrix.target }}/release/hibernaut-tray$ext" "hibernaut-tray-${{ matrix.target }}$ext"
       - uses: softprops/action-gh-release@v2
         with:
-          files: ccnap-${{ matrix.target }}*
+          files: |
+            hibernaut-${{ matrix.target }}*
+            hibernaut-tray-${{ matrix.target }}*

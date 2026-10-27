@@ -1,4 +1,4 @@
-//! How ccnap reads a `claude` command line: which invocations to leave alone, and how to
+//! How hibernaut reads a `claude` command line: which invocations to leave alone, and how to
 //! rebuild one as `claude --resume <id>` after a nap.
 
 use crate::hook::Comeback;
