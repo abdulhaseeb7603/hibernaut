@@ -356,9 +356,6 @@ fn menu_actions_nap_wake_and_restart_a_terminal_session() {
     t.wait_for("FAKE READY resume=none", 1);
     t.send(b"\x1b[I");
     let pid = t.child.process_id().unwrap().to_string();
-    // Newer Windows consoles drop keys that arrive in the same instant as a focus report; a
-    // person never types that fast.
-    thread::sleep(Duration::from_millis(300));
     t.send(b"abc");
     // Ask only once hibernaut has seen the text, which a slow machine takes a while to pass on.
     let start = Instant::now();

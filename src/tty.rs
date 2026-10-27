@@ -99,9 +99,6 @@ impl Wrapper {
                 Ok(Some(bytes)) => {
                     let now = now_ms();
                     let k = scan_keys(&bytes);
-                    // TEMPORARY (CI diagnosis): the shape of each input chunk, letters masked.
-                    let shape: String = String::from_utf8_lossy(&bytes).chars().map(|c| if c.is_alphabetic() { 'x' } else { c }).collect();
-                    log(format_args!("input {} bytes, {} as keys: {shape:?}", bytes.len(), k.keys.len()));
                     if let Some(f) = k.focus {
                         (act.focus_known, act.focused, act.last_focus) = (true, f, now);
                         log(format_args!("focus {}", if f { "in" } else { "out" }));
@@ -279,7 +276,7 @@ impl Wrapper {
             while let Ok(n @ 1..) = reader.read(&mut buf) {
                 shared.last_output.store(now_ms(), Relaxed);
                 shared.note_modes(&mut tail, &buf[..n]);
-                out(&buf[..n]);
+                out(&without_win32_input(&buf[..n]));
             }
         });
         Ok(Live { child, master, writer, output_done })
@@ -443,6 +440,25 @@ fn type_in(l: &mut Live, bytes: &[u8]) {
             send(l, b"\r");
         }
     }
+}
+
+/// Claude's output without a request for win32-input-mode. Newer Windows pseudo-terminals ask
+/// for it; passed on, the console would send hibernaut every key in that encoding, which it
+/// doesn't read, so it would miss unsent text. Plain keys still reach claude fine.
+// ponytail: a request split across two reads gets through; ConPTY sends it whole at startup.
+fn without_win32_input(chunk: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    const ASK: &[u8] = b"\x1b[?9001h";
+    if !chunk.windows(ASK.len()).any(|w| w == ASK) {
+        return chunk.into();
+    }
+    let mut out = Vec::with_capacity(chunk.len());
+    let mut rest = chunk;
+    while let Some(at) = rest.windows(ASK.len()).position(|w| w == ASK) {
+        out.extend_from_slice(&rest[..at]);
+        rest = &rest[at + ASK.len()..];
+    }
+    out.extend_from_slice(rest);
+    out.into()
 }
 
 fn finish(l: Live) {
@@ -688,6 +704,12 @@ fn out(b: &[u8]) {
 mod tests {
     use super::*;
     use std::{fs, process};
+
+    #[test]
+    fn claude_cant_switch_our_keys_to_win32_input_mode() {
+        assert_eq!(&*without_win32_input(b"\x1b[6n\x1b[?9001h\x1b[?1004hhi\x1b[?9001h"), b"\x1b[6n\x1b[?1004hhi");
+        assert!(matches!(without_win32_input(b"plain"), std::borrow::Cow::Borrowed(_)));
+    }
 
     #[test]
     fn keys_split_out_focus_reports() {
