@@ -101,10 +101,185 @@ pub fn setup() -> io::Result<()> {
     if old > 0 {
         println!("{old} open session{} still run the previous ccnap. {}", if old == 1 { "" } else { "s" }, crate::status::UPDATE_HINT);
     }
+    if cfg!(any(windows, target_os = "macos")) {
+        setup_tray()?;
+    }
     Ok(())
 }
 
+/// Installs the tray icon next to ccnap, has it start at login, and starts it now, replacing
+/// one that is already running so it shows this version.
+fn setup_tray() -> io::Result<()> {
+    let dst = tray_exe();
+    let beside_me = env::current_exe()?.with_file_name(dst.file_name().unwrap());
+    let src = if beside_me.is_file() { beside_me } else { dst.clone() };
+    if !src.is_file() {
+        println!("tray: ccnap-tray wasn't found next to ccnap, so there's no tray icon");
+        return Ok(());
+    }
+    stop_tray();
+    if fs::canonicalize(&src).ok() != fs::canonicalize(&dst).ok() {
+        replace(&src, &dst)?;
+    }
+    login::set(Some(&dst))?;
+    start_tray(&dst)?;
+    println!("tray: the ccnap icon is by the clock, and starts at login (turn that off in its menu)");
+    Ok(())
+}
+
+pub fn tray_exe() -> PathBuf {
+    bin_dir().join(format!("ccnap-tray{EXE}"))
+}
+
+/// The running tray icon's heartbeat: its pid, rewritten every few seconds.
+pub fn tray_heartbeat() -> PathBuf {
+    crate::temp_dir().join("tray.json")
+}
+
+/// Written to ask the running tray icon to quit.
+pub fn tray_quit() -> PathBuf {
+    crate::temp_dir().join("tray.quit")
+}
+
+/// Ends the running tray icon, if any. It's asked to quit first: one ended by force leaves a
+/// dead icon by the clock until the pointer passes over it.
+fn stop_tray() -> bool {
+    let Some(pid) = tray_pid() else { return false };
+    let _ = fs::write(tray_quit(), "");
+    for _ in 0..50 {
+        if tray_pid().is_none() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    crate::proc::end_tree(pid);
+    let _ = fs::remove_file(tray_heartbeat());
+    let _ = fs::remove_file(tray_quit());
+    true
+}
+
+/// The pid of a tray icon that is running now.
+pub fn tray_pid() -> Option<u32> {
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(tray_heartbeat()).ok()?).ok()?;
+    let fresh = crate::now_ms().saturating_sub(v["updated"].as_u64()?) < 10_000;
+    let pid = fresh.then(|| v["pid"].as_u64()).flatten()? as u32;
+    // A tray that was just ended leaves a fresh heartbeat behind.
+    crate::proc::list().iter().any(|p| p.pid == pid && p.name.starts_with("ccnap-tray")).then_some(pid)
+}
+
+pub fn start_tray(exe: &Path) -> io::Result<()> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x8;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn().map(drop)
+}
+
+/// Starting the tray icon at login.
+#[cfg(windows)]
+pub mod login {
+    use std::{io, path::Path, ptr};
+    use windows_sys::Win32::{Foundation::*, System::Registry::*};
+
+    const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain([0]).collect()
+    }
+
+    pub fn enabled() -> bool {
+        let mut size = 0u32;
+        let code = unsafe {
+            RegGetValueW(HKEY_CURRENT_USER, wide(RUN).as_ptr(), wide("ccnap").as_ptr(), RRF_RT_REG_SZ, ptr::null_mut(), ptr::null_mut(), &mut size)
+        };
+        code == ERROR_SUCCESS
+    }
+
+    pub fn set(tray: Option<&Path>) -> io::Result<()> {
+        let name = wide("ccnap");
+        let code = unsafe {
+            let mut key = ptr::null_mut();
+            let code = RegOpenKeyExW(HKEY_CURRENT_USER, wide(RUN).as_ptr(), 0, KEY_SET_VALUE, &mut key);
+            if code != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(code as i32));
+            }
+            let code = match tray {
+                Some(exe) => {
+                    let data = wide(&format!("\"{}\"", exe.display()));
+                    RegSetValueExW(key, name.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), (data.len() * 2) as u32)
+                }
+                None => match RegDeleteValueW(key, name.as_ptr()) {
+                    ERROR_FILE_NOT_FOUND => ERROR_SUCCESS,
+                    c => c,
+                },
+            };
+            RegCloseKey(key);
+            code
+        };
+        if code == ERROR_SUCCESS { Ok(()) } else { Err(io::Error::from_raw_os_error(code as i32)) }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub mod login {
+    use std::{fs, io, path::Path, path::PathBuf};
+
+    fn agent() -> PathBuf {
+        super::user_home().join("Library").join("LaunchAgents").join("dev.ccnap.tray.plist")
+    }
+
+    pub fn enabled() -> bool {
+        agent().is_file()
+    }
+
+    pub fn set(tray: Option<&Path>) -> io::Result<()> {
+        let Some(exe) = tray else {
+            return match fs::remove_file(agent()) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            };
+        };
+        let exe = exe.display().to_string().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>dev.ccnap.tray</string>
+    <key>ProgramArguments</key><array><string>{exe}</string></array>
+    <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+"#
+        );
+        fs::create_dir_all(agent().parent().unwrap())?;
+        fs::write(agent(), plist)
+    }
+}
+
+/// No tray icon here yet, so nothing to start at login.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub mod login {
+    pub fn set(_tray: Option<&std::path::Path>) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 pub fn uninstall() -> io::Result<()> {
+    login::set(None)?;
+    if stop_tray() {
+        println!("tray: icon removed");
+    }
     for (name, file) in editor_settings() {
         let Ok(text) = fs::read_to_string(&file) else { continue };
         if jsonc::get_string(&text, WRAPPER_KEY).is_some_and(|v| is_ours(&v)) {
@@ -116,7 +291,9 @@ pub fn uninstall() -> io::Result<()> {
     }
     let bin = bin_dir();
     path::remove(&bin)?;
-    match fs::remove_file(bin.join(format!("claude{EXE}"))) {
+    // One still running in an open terminal can't be deleted, only moved out of the way.
+    let shim = bin.join(format!("claude{EXE}"));
+    match fs::remove_file(&shim).or_else(|_| fs::rename(&shim, shim.with_extension(format!("old{}", std::process::id())))) {
         Ok(()) => println!("terminals: `claude` is Claude Code again"),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => println!("couldn't remove the claude shim ({e}); close running sessions and retry"),

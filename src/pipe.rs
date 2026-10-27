@@ -6,7 +6,11 @@
 //! again with `--resume`, and the setup the SDK sent the first time (initialize, then model,
 //! permission mode and the like) is replayed into it. The SDK never sees the swap.
 
-use crate::{args, config, hook, log, now_ms, proc, session_cwd, status, term, Files, REARM_AFTER_MS};
+use crate::{
+    args, config,
+    control::{self, Action},
+    hook, log, now_ms, proc, session_cwd, status, term, Files, REARM_AFTER_MS,
+};
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
@@ -94,6 +98,7 @@ pub fn run(claude: PathBuf, toks: Vec<args::Tok>, files: Files) -> io::Result<i3
     // Memory of claude's process tree; what the last nap freed; whether a nap for memory may
     // happen, and when a sample may allow one again after one (see REARM_AFTER_MS).
     let (mut memory, mut freed, mut armed, mut rearm_at) = (0u64, 0u64, true, 0u64);
+    let mut last_action = Value::Null;
     loop {
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Ev::In(Some(line))) => {
@@ -147,6 +152,35 @@ pub fn run(claude: PathBuf, toks: Vec<args::Tok>, files: Files) -> io::Result<i3
                 return Ok(exit.code().unwrap_or(1));
             }
         }
+        // A request from the tray or `ccnap nap|wake|restart`: no waiting for idle time, but
+        // the same checks as any nap, so nothing in flight is lost.
+        if let Some(action) = control::take() {
+            let result = match (action, live.is_some()) {
+                (Action::Nap | Action::Restart, true) => match p.blocker(&st, now, 0) {
+                    Some(why) => format!("not now: {why}"),
+                    None => {
+                        (freed, since) = (memory, now);
+                        p.nap(live.take().unwrap());
+                        if action == Action::Restart {
+                            live = Some(p.wake(&st)?);
+                            (memory, p.last_activity) = (0, now);
+                            "restarted".into()
+                        } else {
+                            format!("napped, {} freed", status::size(freed))
+                        }
+                    }
+                },
+                (Action::Nap, false) => "already napping".into(),
+                (Action::Wake | Action::Restart, false) => {
+                    live = Some(p.wake(&st)?);
+                    (p.last_activity, since) = (now, now);
+                    "woke".into()
+                }
+                (Action::Wake, true) => "already awake".into(),
+            };
+            log(format_args!("{} requested: {result}", action.name()));
+            last_action = control::outcome(action, &result, now);
+        }
         let cwd = session_cwd(&st, &p.cwd);
         let pid = live.as_ref().map(|l| l.child.id());
         let mut why = None;
@@ -175,6 +209,13 @@ pub fn run(claude: PathBuf, toks: Vec<args::Tok>, files: Files) -> io::Result<i3
                 p.nap(live.take().unwrap());
             }
         }
+        // A newer ccnap was installed. While napping nothing runs, so step aside: a clean exit
+        // is how a session ends, the extension closes it quietly, and its next message starts
+        // the session again through the new ccnap.
+        if live.is_none() && status.replaced() {
+            log("a newer ccnap is installed; handing the session over to it");
+            return Ok(0);
+        }
         let napping = live.is_none();
         status.update(
             now,
@@ -182,7 +223,7 @@ pub fn run(claude: PathBuf, toks: Vec<args::Tok>, files: Files) -> io::Result<i3
                 "pid": std::process::id(), "mode": "panel", "napping": napping,
                 "why": if napping { None } else { why }, "claude_pid": pid, "since": since,
                 "memory": if napping { 0 } else { memory }, "freed": freed,
-                "cwd": cwd, "session": st.session_id,
+                "cwd": cwd, "session": st.session_id, "last_action": last_action,
             }),
         );
     }

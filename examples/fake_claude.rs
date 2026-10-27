@@ -62,7 +62,7 @@ fn main() {
         for (k, v) in extra.as_object().unwrap() {
             input[k] = v.clone();
         }
-        for group in settings["hooks"][event].as_array().unwrap() {
+        for group in settings["hooks"][event].as_array().into_iter().flatten() {
             for h in group["hooks"].as_array().unwrap() {
                 let args = h["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap());
                 let mut c = Command::new(h["command"].as_str().unwrap())

@@ -4,7 +4,7 @@
 use crate::{install, parse_duration};
 use serde_json::Value;
 use std::{
-    env, fs,
+    env, fs, io,
     path::{Path, PathBuf},
     sync::RwLock,
     time::SystemTime,
@@ -25,6 +25,11 @@ memory_limit = "2GB"
 # Sessions working in these folders never nap or restart.
 exclude_dirs = []
 
+# Claude sessions that don't run through ccnap yet (started before it was installed, or on an
+# older ccnap) move into it once idle, in editor chat panels: "auto", or "off" to move them
+# only from the tray menu.
+adopt = "auto"
+
 # Log every decision here, to see why a session stayed awake.
 # log = "~/ccnap.log"
 "#;
@@ -36,31 +41,88 @@ pub struct Config {
     pub memory_limit: u64,
     pub exclude_dirs: Vec<PathBuf>,
     pub log: Option<PathBuf>,
+    /// Move idle sessions that don't run through ccnap into it, without being asked.
+    pub adopt: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { idle_ms: DEFAULT_IDLE_MS, memory_limit: DEFAULT_MEMORY_LIMIT, exclude_dirs: Vec::new(), log: None }
+        Config { idle_ms: DEFAULT_IDLE_MS, memory_limit: DEFAULT_MEMORY_LIMIT, exclude_dirs: Vec::new(), log: None, adopt: true }
     }
 }
 
 impl Config {
     pub fn excludes(&self, dir: &Path) -> bool {
-        let norm = |p: &Path| {
-            let s = p.to_string_lossy().replace('\\', "/");
-            if cfg!(windows) { s.to_lowercase() } else { s }
-        };
         let dir = norm(dir);
         self.exclude_dirs.iter().any(|x| {
             let x = norm(x);
-            let x = x.trim_end_matches('/');
             dir == x || dir.starts_with(&format!("{x}/"))
         })
     }
 }
 
+/// A folder as compared for exclusion: forward slashes, no trailing one, any case on Windows.
+fn norm(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/").trim_end_matches('/').to_string();
+    if cfg!(windows) { s.to_lowercase() } else { s }
+}
+
 pub fn path() -> PathBuf {
     install::home().join("config.toml")
+}
+
+/// Sets `key = value` (a TOML value) in the settings file, keeping everything else in it.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))] // used by the tray
+pub fn set(key: &str, value: &str) -> io::Result<()> {
+    let path = path();
+    let text = fs::read_to_string(&path).unwrap_or_else(|_| TEMPLATE.to_string());
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(&path, set_in(&text, key, value))
+}
+
+/// Puts `dir` on the settings' exclude_dirs list, or takes it off.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))] // used by the tray
+pub fn set_excluded(dir: &Path, excluded: bool) -> io::Result<()> {
+    let mut dirs = fs::read_to_string(path()).map(|t| parse(&t).exclude_dirs).unwrap_or_default();
+    dirs.retain(|d| norm(d) != norm(dir));
+    if excluded {
+        dirs.push(dir.to_path_buf());
+    }
+    let items: Vec<String> = dirs.iter().map(|d| toml_string(&d.to_string_lossy())).collect();
+    set("exclude_dirs", &format!("[{}]", items.join(", ")))
+}
+
+/// `s` as a TOML string: a literal one ('…', no escapes, which suits Windows paths) when it can be.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))] // used by the tray
+pub fn toml_string(s: &str) -> String {
+    if s.contains(['\'', '\n']) { serde_json::to_string(s).unwrap() } else { format!("'{s}'") }
+}
+
+/// `text` with `key` set to `value`, or with the line added if the key isn't there. An array
+/// value may run over several lines, up to its `]`.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))] // used by the tray
+fn set_in(text: &str, key: &str, value: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let value_of = |l: &str| strip_comment(l).split_once('=').map(|(k, v)| (k.trim().to_string(), v.trim().to_string()));
+    let line = format!("{key} = {value}");
+    let Some(start) = lines.iter().position(|l| value_of(l).is_some_and(|(k, _)| k == key)) else {
+        let text = text.trim_end();
+        return if text.is_empty() { format!("{line}\n") } else { format!("{text}\n{line}\n") };
+    };
+    let mut end = start;
+    let (_, mut v) = value_of(lines[start]).unwrap();
+    if v.starts_with('[') {
+        while !v.ends_with(']') && end + 1 < lines.len() {
+            end += 1;
+            v.push_str(strip_comment(lines[end]).trim());
+        }
+    }
+    let mut out: Vec<&str> = lines[..start].to_vec();
+    out.push(&line);
+    out.extend_from_slice(&lines[end + 1..]);
+    out.join("\n") + "\n"
 }
 
 static CURRENT: RwLock<Option<(Option<SystemTime>, Config)>> = RwLock::new(None);
@@ -173,6 +235,7 @@ fn apply(c: &mut Config, key: &str, value: &Value) {
             c.exclude_dirs = value.as_array().into_iter().flatten().filter_map(Value::as_str).map(expand).collect();
         }
         "log" => c.log = text.filter(|t| !t.is_empty()).map(|t| expand(&t)),
+        "adopt" => c.adopt = value.as_bool().unwrap_or_else(|| value.as_str() != Some("off")),
         _ => {}
     }
 }
@@ -242,5 +305,21 @@ mod tests {
         assert!(c.excludes(Path::new("/work/secret")));
         assert!(c.excludes(Path::new("/work/secret/app")));
         assert!(!c.excludes(Path::new("/work/secretive")));
+    }
+
+    #[test]
+    fn edits_keep_the_rest_of_the_file() {
+        let set = set_in(TEMPLATE, "idle", "\"30m\"");
+        assert_eq!(parse(&set).idle_ms, 30 * 60_000);
+        assert_eq!(set.lines().count(), TEMPLATE.lines().count());
+        assert!(set.contains("# How long a session sits untouched"));
+        // A multi-line array is replaced whole; a missing key is added; comments aren't keys.
+        let text = "exclude_dirs = [\n  'C:\\a',\n  'C:\\b',\n]\n# log = \"x\"\nidle = \"1m\"\n";
+        let set = set_in(text, "exclude_dirs", &format!("[{}]", toml_string(r"C:\Users\me\work")));
+        assert_eq!(set, "exclude_dirs = ['C:\\Users\\me\\work']\n# log = \"x\"\nidle = \"1m\"\n");
+        assert_eq!(parse(&set).exclude_dirs, [PathBuf::from(r"C:\Users\me\work")]);
+        assert!(set_in(&set, "log", "'/tmp/l'").ends_with("idle = \"1m\"\nlog = '/tmp/l'\n"));
+        assert_eq!(set_in("", "idle", "\"5m\""), "idle = \"5m\"\n");
+        assert_eq!(parse(&format!("exclude_dirs = [{}]", toml_string("/it's"))).exclude_dirs, [PathBuf::from("/it's")]);
     }
 }

@@ -3,9 +3,13 @@
 //! focus or a keypress, replaying what was typed. It also restarts a session that has grown
 //! past the memory limit, labels napping tabs with 💤, and hands Ctrl+Z to the shell on Unix.
 
-use crate::{args, config, hook, log, now_ms, proc, session_cwd, status, term, Files, REARM_AFTER_MS};
+use crate::{
+    args, config,
+    control::{self, Action},
+    hook, log, now_ms, proc, session_cwd, status, term, Files, REARM_AFTER_MS,
+};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtyPair, PtySize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     env,
     ffi::OsString,
@@ -74,7 +78,8 @@ impl Wrapper {
         term::ignore_ctrl_c();
         out(b"\x1b[?1004h"); // ask the terminal to report focus changes
         let (tx, keys) = mpsc::channel();
-        term::spawn_reader(tx);
+        #[cfg_attr(not(windows), allow(unused_variables))]
+        let reader = term::spawn_reader(tx);
         let first = [args::flatten(&self.toks), self.files.settings_arg()?].concat();
         let mut live = Some(self.spawn(&first, &self.cwd)?);
         let mut status = status::Status::new(self.files.status.clone());
@@ -83,10 +88,12 @@ impl Wrapper {
         let (mut last_check, mut last_measure, mut since) = (0, 0, now_ms());
         let mut awake_because = None;
         // Keys typed since a wake, held until the new claude is ready for them.
-        let mut replay: Option<(Vec<u8>, u64)> = None;
+        // An older ccnap that handed this session over passes on the keys that woke it.
+        let mut replay: Option<(Vec<u8>, u64)> = env::var("CCNAP_TYPED").ok().and_then(|h| unhex(&h)).map(|k| (k, now_ms()));
         // Memory of claude's process tree; what the last nap freed; whether a restart for memory
         // may happen, and when a sample may allow one again after a restart (see REARM_AFTER_MS).
         let (mut memory, mut freed, mut armed, mut rearm_at) = (0u64, 0u64, true, 0u64);
+        let mut last_action = Value::Null;
         let code = loop {
             match keys.recv_timeout(TICK) {
                 Ok(Some(bytes)) => {
@@ -110,6 +117,10 @@ impl Wrapper {
                             send(l, &k.reports);
                         }
                         (Some(l), None) => send(l, if self.shared.wants_focus.load(Relaxed) { &k.with_focus } else { &k.rest }),
+                        (None, _) if (!k.keys.is_empty() || k.focus == Some(true)) && status.replaced() => {
+                            // A newer ccnap is installed: it takes the session from here.
+                            return self.hand_over(raw, (&reader, &keys), &st, k.keys, status.exe());
+                        }
                         (None, _) if !k.keys.is_empty() || k.focus == Some(true) => {
                             log(format_args!("woken by {} typed bytes, focus {:?}", k.keys.len(), k.focus));
                             act.focused = true;
@@ -160,6 +171,39 @@ impl Wrapper {
                 log(format_args!("state {s:?}"));
                 st = s;
             }
+            // A request from the tray or `ccnap nap|wake|restart`. Unlike a nap on its own, it
+            // doesn't wait for idle time or focus, but it never loses anything either.
+            if let Some(action) = control::take() {
+                let result = match (action, live.is_some()) {
+                    (Action::Nap | Action::Restart, true) => match act.unsafe_to_stop(&st) {
+                        Some(why) => format!("not now: {why}"),
+                        None if action == Action::Nap => {
+                            freed = memory;
+                            self.nap(live.take().unwrap(), freed);
+                            since = now;
+                            format!("napped, {} freed", status::size(freed))
+                        }
+                        None => {
+                            self.stop(live.take().unwrap());
+                            live = Some(self.wake(&st, Some("restarted from ccnap. The conversation is unchanged."))?);
+                            replay = Some((Vec::new(), now));
+                            (memory, since) = (0, now);
+                            "restarted".into()
+                        }
+                    },
+                    (Action::Nap, false) => "already napping".into(),
+                    (Action::Wake | Action::Restart, false) => {
+                        live = Some(self.wake(&st, Some("woken from ccnap"))?);
+                        replay = Some((Vec::new(), now));
+                        // Ready when you get there, not napping again a moment later.
+                        (act.last_input, since) = (now, now);
+                        "woke".into()
+                    }
+                    (Action::Wake, true) => "already awake".into(),
+                };
+                log(format_args!("{} requested: {result}", action.name()));
+                last_action = control::outcome(action, &result, now);
+            }
             let cwd = session_cwd(&st, &self.cwd);
             let pid = live.as_ref().and_then(|l| l.child.process_id());
             let mut why = None;
@@ -198,7 +242,7 @@ impl Wrapper {
                     "pid": std::process::id(), "mode": "terminal", "napping": napping,
                     "why": if napping { None } else { why }, "claude_pid": pid, "since": since,
                     "memory": if napping { 0 } else { memory }, "freed": freed,
-                    "cwd": cwd, "session": st.session_id,
+                    "cwd": cwd, "session": st.session_id, "last_action": last_action,
                 }),
             );
         };
@@ -213,6 +257,7 @@ impl Wrapper {
         cmd.args(argv);
         cmd.cwd(cwd);
         cmd.env("CCNAP_STATE", &self.files.state);
+        cmd.env_remove("CCNAP_TYPED");
         let child = slave.spawn_command(cmd).map_err(io::Error::other)?;
         drop(slave);
         log(format_args!("claude pid {:?}", child.process_id()));
@@ -279,6 +324,46 @@ impl Wrapper {
 
     /// Stops claude and everything it started (MCP servers, shells), then undoes what it may
     /// have left on in the terminal.
+    /// Passes this napping session to the newer ccnap installed at `exe`, which resumes it and
+    /// types in the keys that woke this one. On Unix it replaces this process; on Windows this
+    /// one waits for it, so the terminal sees one program throughout.
+    fn hand_over(
+        &self,
+        raw: term::Raw,
+        #[cfg_attr(unix, allow(unused_variables))] (reader, keys): (&thread::JoinHandle<()>, &mpsc::Receiver<Option<Vec<u8>>>),
+        st: &hook::State,
+        #[cfg_attr(unix, allow(unused_mut))] mut typed: Vec<u8>,
+        exe: &str,
+    ) -> io::Result<i32> {
+        log(format_args!("a newer ccnap is installed; handing session {} to it", st.session_id));
+        #[cfg(windows)]
+        {
+            term::stop_reader(reader);
+            while let Ok(Some(b)) = keys.try_recv() {
+                typed.extend(scan_keys(&b).keys);
+            }
+        }
+        let how = st.comeback().unwrap_or(hook::Comeback::Resume);
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(args::resume(&self.toks, &st.session_id, &st.mode, how))
+            .current_dir(session_cwd(st, &self.cwd))
+            .env("CCNAP_TYPED", hex(&typed))
+            .env_remove("CCNAP_STATE");
+        drop(raw); // the new ccnap sets the terminal up its own way
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            Err(cmd.exec())
+        }
+        #[cfg(windows)]
+        {
+            let mut child = cmd.spawn()?;
+            let _ = std::fs::remove_file(&self.files.status); // the new one reports for the session now
+            proc::trim_self();
+            Ok(child.wait()?.code().unwrap_or(1))
+        }
+    }
+
     fn stop(&self, mut l: Live) {
         if let Some(pid) = l.child.process_id() {
             term::kill_tree(pid, false);
@@ -330,6 +415,15 @@ fn send(l: &mut Live, bytes: &[u8]) {
     if !bytes.is_empty() {
         let _ = l.writer.write_all(bytes).and_then(|()| l.writer.flush());
     }
+}
+
+/// Keys passed to a newer ccnap in an environment variable.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 
 /// Sends what was typed during a nap. Text arriving all at once looks like a paste to Claude,
@@ -451,11 +545,22 @@ impl Activity {
     /// focus, after a shorter quiet spell.
     fn recyclable(&self, st: &hook::State, last_output: u64, now: u64, idle_ms: u64) -> bool {
         let quiet = idle_ms.min(RECYCLE_QUIET_MS);
-        st.state == "idle"
-            && st.comeback().is_ok()
-            && self.draft == 0
+        self.unsafe_to_stop(st).is_none()
             && now.saturating_sub(self.last_input.max(st.at)) >= quiet
             && now.saturating_sub(last_output) >= quiet.min(OUTPUT_QUIET_MS)
+    }
+
+    /// What stopping claude right now would lose, or None if nothing.
+    fn unsafe_to_stop(&self, st: &hook::State) -> Option<&'static str> {
+        if st.state != "idle" {
+            Some("claude is working")
+        } else if let Err(why) = st.comeback() {
+            Some(why)
+        } else if self.draft > 0 {
+            Some("unsent text in the prompt")
+        } else {
+            None
+        }
     }
 }
 

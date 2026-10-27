@@ -8,11 +8,11 @@ use serde_json::{json, Value};
 use std::{
     env, fs,
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// ccnap as an editor's process wrapper around the fake claude, with the SDK's end of the pipes.
@@ -24,16 +24,22 @@ struct Panel {
 }
 
 impl Panel {
-    fn start(name: &str) -> Panel {
+    fn start(name: &str, idle: &str) -> Panel {
+        Panel::start_from(name, idle, false)
+    }
+
+    /// With `own_copy`, ccnap runs from a copy of its own in the test's folder, to update.
+    fn start_from(name: &str, idle: &str, own_copy: bool) -> Panel {
         // Editors run `<wrapper> <path to claude> <args>`, so the fake has to be called claude.
-        let dir = env::temp_dir().join(format!("ccnap-e2e-{}-{name}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = scratch(name);
         let claude = dir.join(format!("claude{}", env::consts::EXE_SUFFIX));
         fs::copy(fake_claude(), &claude).unwrap();
-        let mut ccnap = Command::new(env!("CARGO_BIN_EXE_ccnap"))
+        let exe = if own_copy { copy_ccnap(&dir) } else { PathBuf::from(env!("CARGO_BIN_EXE_ccnap")) };
+        let mut ccnap = Command::new(exe)
             .arg(&claude)
             .args(["--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--model=m1"])
-            .env("CCNAP_IDLE", "2s")
+            .env("CCNAP_IDLE", idle)
+            .env("CCNAP_LOG", dir.join("ccnap.log"))
             .env("CCNAP_HOME", env::temp_dir().join("ccnap-e2e-home"))
             .env_remove("CCNAP_STATE")
             .current_dir(&dir)
@@ -96,7 +102,7 @@ fn answered(id: &'static str) -> impl Fn(&Value) -> bool {
 
 #[test]
 fn panel_naps_when_idle_and_resumes_on_the_next_message() {
-    let mut p = Panel::start("resume");
+    let mut p = Panel::start("resume", "2s");
     p.send(json!({ "type": "control_request", "request_id": "i1", "request": { "subtype": "initialize" } }));
     p.wait_for("initialize answer", &answered("i1"));
     p.send(json!({ "type": "control_request", "request_id": "m1", "request": { "subtype": "set_model", "model": "m2" } }));
@@ -126,7 +132,7 @@ fn panel_naps_when_idle_and_resumes_on_the_next_message() {
 #[test]
 fn panel_naps_an_empty_tab_and_brings_it_back_fresh() {
     // A new chat tab: set up, but nothing sent yet, so there's no transcript to resume.
-    let mut p = Panel::start("empty");
+    let mut p = Panel::start("empty", "2s");
     p.send(json!({ "type": "control_request", "request_id": "i1", "request": { "subtype": "initialize" } }));
     p.wait_for("initialize answer", &answered("i1"));
     thread::sleep(Duration::from_secs(5));
@@ -146,6 +152,38 @@ fn terminal_naps_an_empty_tab_and_brings_it_back_fresh() {
     t.send(b"\x1b[I");
     t.wait_for("FAKE READY resume=none fresh=sess-1", 1);
     t.quit();
+}
+
+/// An empty folder of this test's own.
+fn scratch(name: &str) -> PathBuf {
+    let dir = env::temp_dir().join(format!("ccnap-e2e-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn copy_ccnap(dir: &Path) -> PathBuf {
+    let exe = dir.join(format!("ccnap{}", env::consts::EXE_SUFFIX));
+    fs::copy(env!("CARGO_BIN_EXE_ccnap"), &exe).unwrap();
+    exe
+}
+
+/// Installs a "newer" ccnap over `exe` while it runs, the way `ccnap setup` does.
+fn update(exe: &Path) {
+    fs::rename(exe, exe.with_extension("old")).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_ccnap"), exe).unwrap();
+    fs::File::options().write(true).open(exe).unwrap().set_modified(SystemTime::now()).unwrap();
+}
+
+fn wait_exit(child: &mut std::process::Child, what: &str) -> std::process::ExitStatus {
+    let start = Instant::now();
+    loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            return s;
+        }
+        assert!(start.elapsed() < Duration::from_secs(15), "{what} did not exit");
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn fake_claude() -> PathBuf {
@@ -168,8 +206,14 @@ struct Term {
 
 impl Term {
     fn start(vars: &[(&str, &str)]) -> Term {
+        Term::run(Path::new(env!("CARGO_BIN_EXE_ccnap")), &[], vars)
+    }
+
+    /// `program args`, in a pty with the fake claude set up.
+    fn run(program: &Path, args: &[&str], vars: &[(&str, &str)]) -> Term {
         let pair = native_pty_system().openpty(PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 }).unwrap();
-        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_ccnap"));
+        let mut cmd = CommandBuilder::new(program);
+        cmd.args(args);
         cmd.cwd(env::temp_dir());
         cmd.env("CCNAP_CLAUDE", fake_claude());
         cmd.env("CCNAP_HOME", env::temp_dir().join("ccnap-e2e-home"));
@@ -295,4 +339,149 @@ fn terminal_restarts_a_leaking_claude_even_in_focus_but_never_loops() {
     assert_eq!(t.count("had grown to"), 1);
     assert_eq!(t.count("[ccnap] napping"), 0);
     t.quit();
+}
+
+/// `ccnap <args>`: what it prints.
+fn ccnap(args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_ccnap")).args(args).env("CCNAP_HOME", env::temp_dir().join("ccnap-e2e-home")).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn menu_actions_nap_wake_and_restart_a_terminal_session() {
+    // A long idle time and the tab in focus: nothing naps unless asked to.
+    let t = Term::start(&[("CCNAP_IDLE", "1h")]);
+    t.wait_for("FAKE READY resume=none", 1);
+    t.send(b"\x1b[I");
+    let pid = t.child.process_id().unwrap().to_string();
+    t.send(b"abc");
+    thread::sleep(Duration::from_millis(1500));
+    let refused = ccnap(&["nap", &pid]);
+    assert!(refused.contains("not now: unsent text in the prompt"), "{refused}");
+    t.send(b"\r");
+    t.wait_for("SUBMIT \"abc\"", 1);
+    let napped = ccnap(&["nap", &pid]);
+    assert!(napped.contains("napped"), "{napped}");
+    t.wait_for("[ccnap] napping", 1);
+    assert!(ccnap(&["wake", &pid]).contains("woke"));
+    t.wait_for("FAKE READY resume=sess-1", 1);
+    assert!(ccnap(&["restart", &pid]).contains("restarted"));
+    t.wait_for("FAKE READY resume=sess-1", 2);
+    t.quit();
+}
+
+#[test]
+fn menu_actions_nap_and_wake_a_panel_session() {
+    let mut p = Panel::start("menu", "1h");
+    p.send(json!({ "type": "control_request", "request_id": "i1", "request": { "subtype": "initialize" } }));
+    p.wait_for("initialize answer", &answered("i1"));
+    p.send(json!({ "type": "user", "message": { "role": "user", "content": "hello" } }));
+    let first = p.reply("hello");
+    let pid = p.ccnap.id().to_string();
+    thread::sleep(Duration::from_millis(1500));
+    assert!(ccnap(&["nap", &pid]).contains("napped"));
+    assert!(ccnap(&["wake", &pid]).contains("woke"));
+    // Woken ahead of the next message, and set up as before.
+    p.send(json!({ "type": "user", "message": { "role": "user", "content": "again" } }));
+    let second = p.reply("again");
+    assert!(second.contains("resumed=sess-1") && second.contains("inits=1"), "{second}");
+    assert_ne!(first.rsplit("pid=").next(), second.rsplit("pid=").next());
+    p.close();
+}
+
+#[test]
+fn panel_hands_a_napping_session_to_a_newer_ccnap() {
+    let mut p = Panel::start_from("update", "2s", true);
+    p.send(json!({ "type": "control_request", "request_id": "i1", "request": { "subtype": "initialize" } }));
+    p.wait_for("initialize answer", &answered("i1"));
+    p.send(json!({ "type": "user", "message": { "role": "user", "content": "hello" } }));
+    p.reply("hello");
+    thread::sleep(Duration::from_secs(5)); // napping
+    update(&p.dir.join(format!("ccnap{}", env::consts::EXE_SUFFIX)));
+    // It ends the way a session ends, so the editor starts the next message through the new one.
+    let status = wait_exit(&mut p.ccnap, "the older ccnap");
+    assert!(status.success(), "{status}");
+    let log = fs::read_to_string(p.dir.join("ccnap.log")).unwrap();
+    assert!(log.contains("handing the session over"), "{log}");
+    p.close();
+}
+
+#[test]
+fn terminal_moves_to_a_newer_ccnap_when_woken_keeping_what_was_typed() {
+    let dir = scratch("handover");
+    let exe = copy_ccnap(&dir);
+    let log = dir.join("ccnap.log");
+    let t = Term::run(&exe, &[], &[("CCNAP_IDLE", "2s"), ("CCNAP_LOG", log.to_str().unwrap())]);
+    t.wait_for("FAKE READY resume=none", 1);
+    t.send(b"\x1b[O");
+    t.wait_for("[ccnap] napping", 1);
+    update(&exe);
+    t.send(b"hi\r"); // typing wakes it: the newer ccnap takes over and gets the keys
+    t.wait_for("FAKE READY resume=sess-1", 1);
+    t.wait_for("SUBMIT \"hi\"", 1);
+    let text = fs::read_to_string(&log).unwrap();
+    assert!(text.contains("handing session"), "{text}");
+    t.quit();
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// Types into a terminal from outside it, the way a terminal session moves into ccnap.
+#[cfg(windows)]
+#[test]
+fn types_into_another_terminal() {
+    let t = Term::run(Path::new("cmd.exe"), &["/q", "/k", "prompt $g"], &[]);
+    thread::sleep(Duration::from_millis(1500));
+    let pid = t.child.process_id().unwrap().to_string();
+    let typed = Command::new(env!("CARGO_BIN_EXE_ccnap")).args(["__type", &pid, "echo typed-%OS%"]).status().unwrap();
+    assert!(typed.success(), "{typed}");
+    t.wait_for("typed-Windows_NT", 1);
+    t.send(b"exit\r");
+}
+
+/// A Claude panel session started before ccnap: ended the way a session ends, once idle.
+#[cfg(windows)]
+#[test]
+fn moves_an_idle_panel_session_into_ccnap() {
+    let dir = scratch("adopt");
+    let claude = dir.join("claude.exe");
+    fs::copy(fake_claude(), &claude).unwrap();
+    let now = || SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    fs::write(dir.join("settings.json"), "{}").unwrap();
+    let started = now();
+    let mut running = Command::new(&claude)
+        .args(["--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--settings"])
+        .arg(dir.join("settings.json"))
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    // Claude's record of it, in a Claude home of this test's own; and ccnap's status files in a
+    // temp folder of its own, so no real session is touched.
+    let record = |status: &str, at: u64| {
+        json!({ "pid": running.id(), "sessionId": "s1", "cwd": dir, "startedAt": started, "kind": "interactive",
+                "entrypoint": "claude-vscode", "status": status, "statusUpdatedAt": at })
+    };
+    fs::create_dir_all(dir.join("claude").join("sessions")).unwrap();
+    let write = |r: Value| fs::write(dir.join("claude").join("sessions").join(format!("{}.json", running.id())), r.to_string()).unwrap();
+    let adopt = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_ccnap"))
+            .arg("adopt")
+            .env("CLAUDE_CONFIG_DIR", dir.join("claude"))
+            .env("TMP", &dir)
+            .env("TEMP", &dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    write(record("busy", now()));
+    assert!(adopt().contains("not now: claude is working"));
+    write(record("idle", now()));
+    assert!(adopt().contains("not now: used in the last 2 minutes"));
+    write(record("idle", now() - 5 * 60_000));
+    let out = adopt();
+    assert!(out.contains("moved"), "{out}");
+    let status = wait_exit(&mut running, "the claude");
+    assert_eq!(status.code(), Some(0), "the editor would report a crash");
+    let _ = fs::remove_dir_all(dir);
 }

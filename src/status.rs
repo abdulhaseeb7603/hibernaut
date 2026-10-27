@@ -30,6 +30,16 @@ impl Status {
         Status { path, last: Value::Null, written: 0, build: modified_ms(&exe), exe }
     }
 
+    /// A newer ccnap was installed over the one this session runs.
+    pub fn replaced(&self) -> bool {
+        self.build != 0 && modified_ms(&self.exe) != self.build
+    }
+
+    /// The path this session's ccnap was started from, which holds the newer one once replaced.
+    pub fn exe(&self) -> &str {
+        &self.exe
+    }
+
     pub fn update(&mut self, now: u64, mut v: Value) {
         if v == self.last && now.saturating_sub(self.written) < HEARTBEAT_MS {
             return;
@@ -47,7 +57,7 @@ impl Status {
 }
 
 /// The running sessions, from their status files.
-fn sessions(now: u64) -> Vec<Value> {
+pub fn sessions(now: u64) -> Vec<Value> {
     fs::read_dir(temp_dir())
         .into_iter()
         .flatten()
@@ -59,7 +69,7 @@ fn sessions(now: u64) -> Vec<Value> {
 }
 
 /// A session started before its ccnap binary was replaced, so it still runs the old code.
-fn outdated(v: &Value) -> bool {
+pub fn outdated(v: &Value) -> bool {
     match (v["exe"].as_str(), v["build"].as_u64()) {
         (Some(exe), Some(build)) => modified_ms(exe) != build,
         _ => true, // from a build that didn't record itself, so older still
@@ -71,8 +81,11 @@ pub fn outdated_count() -> usize {
     sessions(now_ms()).iter().filter(|v| outdated(v)).count()
 }
 
-pub const UPDATE_HINT: &str =
-    "They update the next time they start: in your editor run \"Developer: Reload Window\", and restart terminal sessions.";
+pub const UPDATE_HINT: &str = if cfg!(windows) {
+    "Panel sessions move to the new one by themselves once idle; for terminal sessions, use the tray icon or `ccnap adopt --terminals`."
+} else {
+    "They update the next time they start: in your editor run \"Developer: Reload Window\", and restart terminal sessions."
+};
 
 pub fn show() -> io::Result<()> {
     let now = now_ms();
@@ -115,19 +128,10 @@ pub fn show() -> io::Result<()> {
         }
     }
 
-    // Claude processes that ccnap doesn't manage, such as leftovers from closed editor tabs.
-    let ours: HashSet<u32> = rows.iter().flat_map(|v| [u(v, "pid") as u32, u(v, "claude_pid") as u32]).collect();
-    let all = proc::list();
-    let others: Vec<(u32, u64)> = all
-        .iter()
-        .filter(|p| proc::is_claude(&p.name) && !ours.contains(&p.pid))
-        // A claude started by another claude (a subagent or `claude -p` from a hook) belongs to its parent.
-        .filter(|p| !all.iter().any(|q| q.pid == p.ppid && proc::is_claude(&q.name)))
-        .map(|p| (p.pid, proc::tree_rss_in(&all, p.pid)))
-        .collect();
+    let others = leftovers(&rows);
     if !others.is_empty() {
         let total: u64 = others.iter().map(|(_, m)| m).sum();
-        let pids: Vec<String> = others.iter().map(|(p, m)| format!("{p} ({})", size(*m))).collect();
+        let pids: Vec<String> = others.iter().map(|(p, m)| format!("{p} ({}, {})", size(*m), crate::adopt::origin(*p).label)).collect();
         println!();
         println!("{} claude process{} not running through ccnap, using {}: {}", others.len(), if others.len() == 1 { "" } else { "es" }, size(total), pids.join(", "));
         println!("  These never nap. Sessions opened after `ccnap setup` do; leftovers from closed tabs can be ended.");
@@ -136,6 +140,20 @@ pub fn show() -> io::Result<()> {
         println!("No Claude Code sessions running. Settings: {}", crate::config::path().display());
     }
     Ok(())
+}
+
+/// Claude processes that ccnap doesn't manage, such as leftovers from closed editor tabs, with
+/// the memory each one's process tree holds.
+pub fn leftovers(sessions: &[Value]) -> Vec<(u32, u64)> {
+    let u = |v: &Value, k: &str| v[k].as_u64().unwrap_or(0) as u32;
+    let ours: HashSet<u32> = sessions.iter().flat_map(|v| [u(v, "pid"), u(v, "claude_pid")]).collect();
+    let all = proc::list();
+    all.iter()
+        .filter(|p| proc::is_claude(&p.name) && !ours.contains(&p.pid))
+        // A claude started by another claude (a subagent or `claude -p` from a hook) belongs to its parent.
+        .filter(|p| !all.iter().any(|q| q.pid == p.ppid && proc::is_claude(&q.name)))
+        .map(|p| (p.pid, proc::tree_rss_in(&all, p.pid)))
+        .collect()
 }
 
 pub fn size(bytes: u64) -> String {

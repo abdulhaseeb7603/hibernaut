@@ -2,10 +2,14 @@
 #   irm https://raw.githubusercontent.com/abdulhaseeb7603/ccnap/main/install.ps1 | iex
 $ErrorActionPreference = 'Stop'
 $repo = 'abdulhaseeb7603/ccnap'
-$tmp = Join-Path $env:TEMP "ccnap-setup-$PID.exe"
+$base = "https://github.com/$repo/releases/latest/download"
+$dir = Join-Path $env:TEMP "ccnap-setup-$PID"
+New-Item -ItemType Directory -Force $dir | Out-Null
 try {
-    Invoke-WebRequest "https://github.com/$repo/releases/latest/download/ccnap-x86_64-pc-windows-msvc.exe" -OutFile $tmp -UseBasicParsing
-    & $tmp setup
+    Invoke-WebRequest "$base/ccnap-x86_64-pc-windows-msvc.exe" -OutFile "$dir\ccnap.exe" -UseBasicParsing
+    # The tray icon; `ccnap setup` installs it from next to ccnap.
+    Invoke-WebRequest "$base/ccnap-tray-x86_64-pc-windows-msvc.exe" -OutFile "$dir\ccnap-tray.exe" -UseBasicParsing
+    & "$dir\ccnap.exe" setup
 } finally {
-    Remove-Item $tmp -ErrorAction SilentlyContinue
+    Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
 }
