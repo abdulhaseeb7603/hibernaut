@@ -355,7 +355,12 @@ fn menu_actions_nap_wake_and_restart_a_terminal_session() {
     t.send(b"\x1b[I");
     let pid = t.child.process_id().unwrap().to_string();
     t.send(b"abc");
-    thread::sleep(Duration::from_millis(1500));
+    // Ask only once ccnap has seen the text, which a slow machine takes a while to pass on.
+    let start = Instant::now();
+    while !ccnap(&["status"]).contains("unsent text") {
+        assert!(start.elapsed() < Duration::from_secs(15), "the typed text never showed in the status");
+        thread::sleep(Duration::from_millis(200));
+    }
     let refused = ccnap(&["nap", &pid]);
     assert!(refused.contains("not now: unsent text in the prompt"), "{refused}");
     t.send(b"\r");
