@@ -1,5 +1,5 @@
-//! `ccnap status`: every running session, awake or napping and why, with the memory it holds
-//! or freed, plus claude processes that don't run through ccnap (left behind by closed editor
+//! `hibernaut status`: every running session, awake or napping and why, with the memory it holds
+//! or freed, plus claude processes that don't run through Hibernaut (left behind by closed editor
 //! tabs, say). Each session keeps a small status file beside its other temp files.
 
 use crate::{install, now_ms, proc, temp_dir};
@@ -7,13 +7,13 @@ use serde_json::Value;
 use std::{collections::HashSet, env, fs, io, path::PathBuf, time::UNIX_EPOCH};
 
 /// A session's status file, rewritten when anything changes and every few seconds, so
-/// `ccnap status` can tell running sessions from ones that died without cleaning up.
+/// `hibernaut status` can tell running sessions from ones that died without cleaning up.
 pub struct Status {
     path: PathBuf,
     last: Value,
     written: u64,
-    /// Which ccnap binary this session runs, and its file's timestamp when the session started:
-    /// once `ccnap setup` replaces the file, the session is running an older build.
+    /// Which hibernaut binary this session runs, and its file's timestamp when the session started:
+    /// once `hibernaut setup` replaces the file, the session is running an older build.
     exe: String,
     build: u64,
 }
@@ -30,12 +30,12 @@ impl Status {
         Status { path, last: Value::Null, written: 0, build: modified_ms(&exe), exe }
     }
 
-    /// A newer ccnap was installed over the one this session runs.
+    /// A newer hibernaut was installed over the one this session runs.
     pub fn replaced(&self) -> bool {
         self.build != 0 && modified_ms(&self.exe) != self.build
     }
 
-    /// The path this session's ccnap was started from, which holds the newer one once replaced.
+    /// The path this session's hibernaut was started from, which holds the newer one once replaced.
     pub fn exe(&self) -> &str {
         &self.exe
     }
@@ -58,31 +58,46 @@ impl Status {
 
 /// The running sessions, from their status files.
 pub fn sessions(now: u64) -> Vec<Value> {
-    fs::read_dir(temp_dir())
+    // Sessions still running ccnap, hibernaut's old name, report in a folder of that name.
+    let legacy = env::temp_dir().join(crate::install::LEGACY);
+    [(temp_dir(), false), (legacy, true)]
         .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".status.json"))
-        .filter_map(|e| serde_json::from_slice::<Value>(&fs::read(e.path()).ok()?).ok())
+        .flat_map(|(dir, legacy)| {
+            fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".status.json"))
+                .filter_map(|e| serde_json::from_slice::<Value>(&fs::read(e.path()).ok()?).ok())
+                .map(move |mut v| {
+                    if legacy {
+                        v["legacy"] = true.into();
+                    }
+                    v
+                })
+        })
         .filter(|v| now.saturating_sub(v["updated"].as_u64().unwrap_or(0)) < 4 * HEARTBEAT_MS)
         .collect()
 }
 
-/// A session started before its ccnap binary was replaced, so it still runs the old code.
+/// A session started before its hibernaut binary was replaced, so it still runs the old code.
 pub fn outdated(v: &Value) -> bool {
+    if v["legacy"] == true {
+        return true;
+    }
     match (v["exe"].as_str(), v["build"].as_u64()) {
         (Some(exe), Some(build)) => modified_ms(exe) != build,
         _ => true, // from a build that didn't record itself, so older still
     }
 }
 
-/// How many running sessions use an older ccnap than the one installed now.
+/// How many running sessions use an older hibernaut than the one installed now.
 pub fn outdated_count() -> usize {
     sessions(now_ms()).iter().filter(|v| outdated(v)).count()
 }
 
 pub const UPDATE_HINT: &str = if cfg!(windows) {
-    "Panel sessions move to the new one by themselves once idle; for terminal sessions, use the tray icon or `ccnap adopt --terminals`."
+    "Panel sessions move to the new one by themselves once idle; for terminal sessions, use the tray icon or `hibernaut adopt --terminals`."
 } else {
     "They update the next time they start: in your editor run \"Developer: Reload Window\", and restart terminal sessions."
 };
@@ -118,13 +133,13 @@ pub fn show() -> io::Result<()> {
                 memory,
                 age(now.saturating_sub(u(v, "since"))),
                 short_dir(v["cwd"].as_str().unwrap_or("")),
-                format!("{}{}", v["why"].as_str().unwrap_or(""), if outdated(v) { " [older ccnap]" } else { "" }).trim()
+                format!("{}{}", v["why"].as_str().unwrap_or(""), if outdated(v) { " [older version]" } else { "" }).trim()
             );
         }
         let old = rows.iter().filter(|v| outdated(v)).count();
         if old > 0 {
             println!();
-            println!("{old} session{} still run an older ccnap. {UPDATE_HINT}", if old == 1 { "" } else { "s" });
+            println!("{old} session{} still run an older version. {UPDATE_HINT}", if old == 1 { "" } else { "s" });
         }
     }
 
@@ -133,8 +148,8 @@ pub fn show() -> io::Result<()> {
         let total: u64 = others.iter().map(|(_, m)| m).sum();
         let pids: Vec<String> = others.iter().map(|(p, m)| format!("{p} ({}, {})", size(*m), crate::adopt::origin(*p).label)).collect();
         println!();
-        println!("{} claude process{} not running through ccnap, using {}: {}", others.len(), if others.len() == 1 { "" } else { "es" }, size(total), pids.join(", "));
-        println!("  These never nap. Sessions opened after `ccnap setup` do; leftovers from closed tabs can be ended.");
+        println!("{} claude process{} not running through Hibernaut, using {}: {}", others.len(), if others.len() == 1 { "" } else { "es" }, size(total), pids.join(", "));
+        println!("  These never nap. Sessions opened after `hibernaut setup` do; leftovers from closed tabs can be ended.");
     }
     if rows.is_empty() && others.is_empty() {
         println!("No Claude Code sessions running. Settings: {}", crate::config::path().display());
@@ -142,7 +157,7 @@ pub fn show() -> io::Result<()> {
     Ok(())
 }
 
-/// Claude processes that ccnap doesn't manage, such as leftovers from closed editor tabs, with
+/// Claude processes that hibernaut doesn't manage, such as leftovers from closed editor tabs, with
 /// the memory each one's process tree holds.
 pub fn leftovers(sessions: &[Value]) -> Vec<(u32, u64)> {
     let u = |v: &Value, k: &str| v[k].as_u64().unwrap_or(0) as u32;

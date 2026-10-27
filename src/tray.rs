@@ -1,4 +1,4 @@
-//! The tray icon (`ccnap-tray`): every ccnap session at a glance, and what you can do about
+//! The tray icon (`hibernaut-tray`): every hibernaut session at a glance, and what you can do about
 //! each, in its menu. It reads the status files sessions write and sends them requests
 //! (control.rs). It never stops Claude itself, so each session keeps all its safety checks.
 //! Settings changes go to config.toml, which running sessions pick up within seconds.
@@ -33,9 +33,9 @@ const LEFTOVERS_EVERY: Duration = Duration::from_secs(10);
 const NOTE_MS: u64 = 60_000;
 const IDLE_CHOICES: &[(&str, &str)] = &[("5 minutes", "5m"), ("10 minutes", "10m"), ("30 minutes", "30m"), ("1 hour", "1h")];
 const MEMORY_CHOICES: &[(&str, &str)] = &[("1 GB", "1GB"), ("2 GB", "2GB"), ("4 GB", "4GB"), ("Never", "off")];
-const TERMINAL_WARNING: &str = "In a terminal, Claude stops and starts again through ccnap, in the same terminal and with the same chat. Text typed into its prompt but not sent is lost. Continue?";
+const TERMINAL_WARNING: &str = "In a terminal, Claude stops and starts again through Hibernaut, in the same terminal and with the same chat. Text typed into its prompt but not sent is lost. Continue?";
 
-/// A claude outside ccnap: its pid, its memory, and what started it.
+/// A claude outside Hibernaut: its pid, its memory, and what started it.
 type Leftover = (u32, u64, Origin);
 
 /// What a menu entry does.
@@ -43,7 +43,7 @@ type Leftover = (u32, u64, Origin);
 enum Do {
     Session(u32, Action),
     NapAll(Vec<u32>),
-    /// Move one session that doesn't run through ccnap into it, by its process id.
+    /// Move one session that doesn't run through Hibernaut into it, by its process id.
     MoveIn(u32),
     /// Move every one that's ready.
     MoveAll,
@@ -91,14 +91,14 @@ pub fn main() {
     let mut shown: Option<Vec<Entry>> = None;
     let mut tip_shown = String::new();
     let mut note: Option<(u64, String)> = None;
-    // Claude processes outside ccnap, and the sessions among them that can move in.
+    // Claude processes outside Hibernaut, and the sessions among them that can move in.
     let mut outside: (Option<Instant>, Vec<Leftover>, Vec<Candidate>) = (None, Vec::new(), Vec::new());
     let mut refreshed: Option<Instant> = None;
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::WaitUntil(Instant::now() + REFRESH);
         match event {
             Event::NewEvents(StartCause::Init) => {
-                tray = TrayIconBuilder::new().with_icon(icon()).with_tooltip("ccnap").build().ok();
+                tray = TrayIconBuilder::new().with_icon(icon()).with_tooltip("hibernaut").build().ok();
                 // macOS draws the new icon once its run loop wakes.
                 #[cfg(target_os = "macos")]
                 if let Some(rl) = objc2_core_foundation::CFRunLoop::main() {
@@ -124,7 +124,7 @@ pub fn main() {
             return;
         }
         refreshed = Some(Instant::now());
-        // `ccnap setup` or `uninstall` asks this tray to make way.
+        // `hibernaut setup` or `uninstall` asks this tray to make way.
         if fs::remove_file(install::tray_quit()).is_ok() {
             tray.take();
             let _ = fs::remove_file(install::tray_heartbeat());
@@ -139,11 +139,11 @@ pub fn main() {
         if outside.0.is_none_or(|t| t.elapsed() >= LEFTOVERS_EVERY) {
             let mut candidates = adopt::candidates(&sessions);
             // Panel sessions move in on their own once idle: nothing is lost, and the next
-            // message brings each one back through ccnap.
+            // message brings each one back through Hibernaut.
             if cfg.adopt {
                 let moved = candidates.iter().filter(|c| c.panel && c.ready() && adopt::move_in(c).is_ok()).count();
                 if moved > 0 {
-                    note = Some((now, format!("moved {moved} session{} into ccnap", if moved == 1 { "" } else { "s" })));
+                    note = Some((now, format!("moved {moved} session{} into Hibernaut", if moved == 1 { "" } else { "s" })));
                     candidates = adopt::candidates(&status::sessions(now));
                 }
             }
@@ -169,7 +169,7 @@ pub fn main() {
     });
 }
 
-/// `ccnap-tray --preview`: a second icon whose menu, filled with made-up sessions, opens at once,
+/// `hibernaut-tray --preview`: a second icon whose menu, filled with made-up sessions, opens at once,
 /// to see how the menu looks. Its items do nothing, and it quits once the menu closes.
 fn preview() {
     let session = |pid: u32, cwd: &str, mode: &str, napping: bool, mb: u64, why: &str| {
@@ -189,14 +189,14 @@ fn preview() {
         session: "s".into(),
         cwd: r"C:\code\betterzone".into(),
         panel: true,
-        old_ccnap: false,
+        old_hibernaut: false,
         memory: 310 << 20,
         wait: None,
         shell: None,
     }];
     let python = Origin { label: "Python program", about: "Started by a Python program using the Claude Agent SDK, not a chat", cost: "" };
     let now = now_ms();
-    let (tip, entries) = model(&sessions, &[(6, 141 << 20, python)], &candidates, &Config::default(), true, Some((now, "moved 2 sessions into ccnap")), now);
+    let (tip, entries) = model(&sessions, &[(6, 141 << 20, python)], &candidates, &Config::default(), true, Some((now, "moved 2 sessions into Hibernaut")), now);
     let menu = Menu::new();
     for e in &entries {
         let _ = menu.append(build(e, &mut HashMap::new()).as_ref());
@@ -213,7 +213,7 @@ fn preview() {
 }
 
 /// The tooltip and the menu for these sessions and settings. `leftovers` are claude processes
-/// outside ccnap; `candidates`, the sessions that can move into it (some of them leftovers).
+/// outside Hibernaut; `candidates`, the sessions that can move into it (some of them leftovers).
 fn model(
     sessions: &[Value],
     leftovers: &[Leftover],
@@ -228,9 +228,9 @@ fn model(
     let saved: u64 = sessions.iter().filter(|v| napping(v)).map(|v| u(v, "freed")).sum();
     let asleep = sessions.iter().filter(|v| napping(v)).count();
     let (summary, tip) = match (sessions.len(), asleep) {
-        (0, _) => ("No Claude Code sessions running".to_string(), "ccnap".to_string()),
-        (n, 0) => (format!("{n} session{}, all awake", plural(n)), format!("ccnap: {n} session{} awake", plural(n))),
-        (n, a) => (format!("Saving {} · {a} of {n} napping", steady(saved)), format!("ccnap: saving {}", steady(saved))),
+        (0, _) => ("No Claude Code sessions running".to_string(), "Hibernaut".to_string()),
+        (n, 0) => (format!("{n} session{}, all awake", plural(n)), format!("Hibernaut: {n} session{} awake", plural(n))),
+        (n, a) => (format!("Saving {} · {a} of {n} napping", steady(saved)), format!("Hibernaut: saving {}", steady(saved))),
     };
 
     let mut menu = vec![Entry::Text(summary)];
@@ -250,10 +250,10 @@ fn model(
     // Every session that can move in, or update, in one click.
     let ready: Vec<&Candidate> = candidates.iter().filter(|c| c.ready()).collect();
     if let n @ 1.. = ready.len() {
-        let what = if ready.iter().all(|c| c.old_ccnap) {
-            format!("Update {n} session{} to this ccnap", plural(n))
+        let what = if ready.iter().all(|c| c.old_hibernaut) {
+            format!("Update {n} session{} to the new version", plural(n))
         } else {
-            format!("Move {n} session{} into ccnap", plural(n))
+            format!("Move {n} session{} into Hibernaut", plural(n))
         };
         let asks = if ready.iter().any(|c| !c.panel) { "…" } else { "" };
         menu.push(Entry::Item(format!("{what}{asks}"), Do::MoveAll));
@@ -270,23 +270,23 @@ fn model(
         menu.push(session_entry(v, name, cfg, candidates));
     }
 
-    // Claude processes outside ccnap, out of the way in one submenu.
+    // Claude processes outside Hibernaut, out of the way in one submenu.
     let outside: Vec<Entry> = candidates
         .iter()
-        .filter(|c| !c.old_ccnap)
+        .filter(|c| !c.old_hibernaut)
         .map(outsider_entry)
         .chain(leftovers.iter().filter(|(pid, ..)| !candidates.iter().any(|c| c.pid == *pid)).map(leftover_entry))
         .collect();
     if !outside.is_empty() {
-        let mut sub = vec![Entry::Text("These never nap, as they don't run through ccnap.".into())];
-        if cfg.adopt && candidates.iter().any(|c| !c.old_ccnap && c.panel && !c.ready()) {
+        let mut sub = vec![Entry::Text("These never nap, as they don't run through Hibernaut.".into())];
+        if cfg.adopt && candidates.iter().any(|c| !c.old_hibernaut && c.panel && !c.ready()) {
             sub.push(Entry::Text("Editor chats move in by themselves once idle.".into()));
         }
         sub.push(Entry::Separator);
         let n = outside.len();
         sub.extend(outside);
         menu.push(Entry::Separator);
-        menu.push(Entry::Sub(format!("Outside ccnap ({n})"), sub));
+        menu.push(Entry::Sub(format!("Outside Hibernaut ({n})"), sub));
     }
 
     menu.push(Entry::Separator);
@@ -330,7 +330,7 @@ fn session_entry(v: &Value, name: &str, cfg: &Config, candidates: &[Candidate]) 
 
     if status::outdated(v) {
         // It doesn't take requests, but restarting it brings it to the installed version.
-        sub.push(Entry::Text(format!("{at} · runs an older ccnap")));
+        sub.push(Entry::Text(format!("{at} · runs an older version")));
         sub.push(Entry::Separator);
         sub.push(match candidates.iter().find(|c| c.pid == pid) {
             Some(c) if c.ready() && c.panel => Entry::Item("Update now (keeps the chat)".into(), Do::MoveIn(pid)),
@@ -358,21 +358,21 @@ fn session_entry(v: &Value, name: &str, cfg: &Config, candidates: &[Candidate]) 
     Entry::Sub(row(&format!("{icon} {name}"), &right), sub)
 }
 
-/// A session that never ran through ccnap.
+/// A session that never ran through Hibernaut.
 fn outsider_entry(c: &Candidate) -> Entry {
     let name = Path::new(&c.cwd).file_name().map_or_else(|| c.cwd.clone(), |n| n.to_string_lossy().into_owned());
     let at = if c.panel { "In the editor" } else { "In a terminal" };
-    let mut sub = vec![Entry::Text(c.cwd.clone()), Entry::Text(format!("{at} · not in ccnap yet")), Entry::Separator];
+    let mut sub = vec![Entry::Text(c.cwd.clone()), Entry::Text(format!("{at} · not in Hibernaut yet")), Entry::Separator];
     sub.push(match c.wait {
-        None if c.panel => Entry::Item("Move into ccnap (keeps the chat)".into(), Do::MoveIn(c.pid)),
-        None => Entry::Item("Move into ccnap (restarts it in its terminal)…".into(), Do::MoveIn(c.pid)),
+        None if c.panel => Entry::Item("Move into Hibernaut (keeps the chat)".into(), Do::MoveIn(c.pid)),
+        None => Entry::Item("Move into Hibernaut (restarts it in its terminal)…".into(), Do::MoveIn(c.pid)),
         Some(why) => Entry::Text(format!("Can move in once idle ({why})")),
     });
     sub.push(Entry::Item("End this process…".into(), Do::End(c.pid, c.memory)));
     Entry::Sub(row(&format!("↻ {name} · {}", place(c.panel)), &steady(c.memory)), sub)
 }
 
-/// A claude outside ccnap that can't move in: a program's, or one nobody accounts for.
+/// A claude outside Hibernaut that can't move in: a program's, or one nobody accounts for.
 fn leftover_entry(&(pid, memory, origin): &Leftover) -> Entry {
     Entry::Sub(
         row(&format!("○ {}", origin.label), &steady(memory)),
@@ -447,7 +447,7 @@ fn perform(what: Do) -> Option<String> {
             }
             let name = Path::new(&c.cwd).file_name().map_or_else(|| c.cwd.clone(), |n| n.to_string_lossy().into_owned());
             adopt::move_in(&c).map_err(std::io::Error::other).map(|()| {
-                if c.panel { format!("{name} moved into ccnap; your next message there resumes it") } else { format!("{name} restarted in its terminal through ccnap") }
+                if c.panel { format!("{name} moved into Hibernaut; your next message there resumes it") } else { format!("{name} restarted in its terminal through Hibernaut") }
             })
         }
         Do::MoveAll => {
@@ -458,7 +458,7 @@ fn perform(what: Do) -> Option<String> {
             }
             let (moved, failed): (Vec<_>, Vec<_>) = ready.into_iter().map(adopt::move_in).partition(Result::is_ok);
             let failed = if failed.is_empty() { String::new() } else { format!(", {} couldn't", failed.len()) };
-            Ok(format!("moved {} session{} into ccnap{failed}", moved.len(), plural(moved.len())))
+            Ok(format!("moved {} session{} into Hibernaut{failed}", moved.len(), plural(moved.len())))
         }
         Do::Exclude(dir, on) => config::set_excluded(&dir, on).map(|()| {
             let name = dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
@@ -559,7 +559,7 @@ fn open(path: &Path) -> std::io::Result<()> {
 fn confirm(question: &str) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO};
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
-    let (text, caption) = (wide(question), wide("ccnap"));
+    let (text, caption) = (wide(question), wide("hibernaut"));
     unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST) == IDYES }
 }
 
@@ -570,22 +570,55 @@ fn confirm(question: &str) -> bool {
     Command::new("osascript").args(["-e", &script]).status().is_ok_and(|s| s.success())
 }
 
-/// A 32×32 icon: Claude's orange with a crescent moon.
+/// A 32×32 icon: the Hibernaut dormouse, curled up asleep under its tail on a night-blue disc.
+/// Drawn on a 64-unit grid, like assets/logo.svg.
 fn icon() -> Icon {
+    Icon::from_rgba(icon_pixels(), 32, 32).expect("a 32x32 RGBA icon")
+}
+
+fn icon_pixels() -> Vec<u8> {
     const N: usize = 32;
+    const SCALE: f32 = 64.0 / N as f32;
+    let rgb = |hex: u32| [(hex >> 16) as f32, (hex >> 8 & 0xff) as f32, (hex & 0xff) as f32];
     let mut px = vec![0u8; N * N * 4];
     for y in 0..N {
         for x in 0..N {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let dist = |cx: f32, cy: f32| ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
-            let disc = (15.5 - dist(16.0, 16.0)).clamp(0.0, 1.0);
-            let moon = (9.5 - dist(14.5, 16.5)).clamp(0.0, 1.0) * (dist(19.0, 12.5) - 8.0).clamp(0.0, 1.0);
-            let mix = |a: f32, b: f32| (a + (b - a) * moon) as u8;
+            let (u, v) = ((x as f32 + 0.5) * SCALE, (y as f32 + 0.5) * SCALE);
+            let dist = |cx: f32, cy: f32| ((u - cx).powi(2) + (v - cy).powi(2)).sqrt();
+            // How much of this pixel a shape `edge` units inside its outline covers.
+            let cover = |edge: f32| (edge / SCALE + 0.5).clamp(0.0, 1.0);
+            let disc = |cx, cy, r| cover(r - dist(cx, cy));
+            // The tail: a thick band spiralling from the body's lower right over its top.
+            let angle = (v - 29.0).atan2(u - 36.0).to_degrees();
+            let along = ((55.0 - angle) / 201.0).clamp(0.0, 1.0);
+            let band = if (-146.0..=55.0).contains(&angle) { cover(3.75 - (dist(36.0, 29.0) - (19.4 - 6.1 * along)).abs()) } else { 0.0 };
+            let tail = band.max(disc(47.0, 45.0, 3.75)).max(disc(25.0, 21.5, 3.75));
+            // The closed eye: a short downward curve.
+            let eye = (0..=8)
+                .map(|i| {
+                    let t = i as f32 / 8.0;
+                    let (ex, ey) = (18.5 + 6.0 * t, 41.5 + 5.2 * t * (1.0 - t));
+                    cover(1.1 - ((u - ex).powi(2) + (v - ey).powi(2)).sqrt())
+                })
+                .fold(0.0, f32::max);
+            let mut c = rgb(0x27304D);
+            for (a, hex) in [
+                (tail, 0xF1D4A3),
+                (disc(34.0, 38.0, 15.5), 0xCF8A3F),
+                (disc(24.0, 40.5, 9.5), 0xE6A75D),
+                (disc(21.5, 30.0, 5.2), 0xCF8A3F),
+                (disc(21.5, 30.0, 2.5), 0xF2B7A6),
+                (eye, 0x3A2414),
+                (disc(15.6, 44.6, 1.5), 0x3A2414),
+            ] {
+                let top = rgb(hex);
+                c = [0, 1, 2].map(|k| c[k] + (top[k] - c[k]) * a);
+            }
             let i = (y * N + x) * 4;
-            px[i..i + 4].copy_from_slice(&[mix(217.0, 255.0), mix(119.0, 255.0), mix(87.0, 255.0), (disc * 255.0) as u8]);
+            px[i..i + 4].copy_from_slice(&[c[0] as u8, c[1] as u8, c[2] as u8, (disc(32.0, 32.0, 31.0) * 255.0) as u8]);
         }
     }
-    Icon::from_rgba(px, N as u32, N as u32).expect("a 32x32 RGBA icon")
+    px
 }
 
 #[cfg(test)]
@@ -593,7 +626,7 @@ mod tests {
     use super::*;
 
     fn session(pid: u32, napping: bool, cwd: &str) -> Value {
-        // Built by this ccnap, so not outdated.
+        // Built by this hibernaut, so not outdated.
         let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
         let build = fs::metadata(&exe).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         json!({ "pid": pid, "napping": napping, "cwd": cwd, "mode": "panel", "memory": 300 << 20, "freed": 280 << 20,
@@ -619,7 +652,7 @@ mod tests {
         let cfg = Config { exclude_dirs: vec!["/w/b".into()], ..Config::default() };
         let sessions = [session(1, true, "/w/a"), session(2, false, "/w/b")];
         let (tip, menu) = model(&sessions, &[(9, 3 << 30, adopt::LEFTOVER)], &[], &cfg, true, None, 0);
-        assert_eq!(tip, "ccnap: saving 280 MB");
+        assert_eq!(tip, "Hibernaut: saving 280 MB");
         assert_eq!(menu[0], Entry::Text("Saving 280 MB · 1 of 2 napping".into()));
         // Awake sessions first, with their memory; napping ones with what they saved.
         let at = |l: &str| menu.iter().position(|e| matches!(e, Entry::Sub(t, _) if t.starts_with(l))).unwrap();
@@ -634,8 +667,8 @@ mod tests {
         assert!(awake.contains(&Entry::Text("In the editor · awake: tab has focus".into())));
         assert!(awake.contains(&Entry::Item("Nap now".into(), Do::Session(2, Action::Nap))));
         assert!(awake.contains(&Entry::Check("Never nap this folder".into(), true, Do::Exclude("/w/b".into(), false))));
-        // Processes outside ccnap are tucked away in one submenu.
-        let leftover = sub(sub(&menu, "Outside ccnap (1)"), "○ Leftover Claude");
+        // Processes outside Hibernaut are tucked away in one submenu.
+        let leftover = sub(sub(&menu, "Outside Hibernaut (1)"), "○ Leftover Claude");
         assert!(leftover.contains(&Entry::Item("End this process…".into(), Do::End(9, 3 << 30))));
         assert_eq!(*find(&menu, "Nap idle"), Entry::Item("Nap idle sessions now".into(), Do::NapAll(vec![2])));
         // Settings too.
@@ -655,7 +688,7 @@ mod tests {
         assert_eq!(menu[0], Entry::Text("2 sessions, all awake".into()));
         assert_eq!(menu[1], Entry::Text("Last: c: not now: claude is working".into()));
         let items = sub(&menu, "● d (old version)");
-        assert!(!items.iter().any(|e| matches!(e, Entry::Item(..) | Entry::Check(..))), "an older ccnap can't take requests");
+        assert!(!items.iter().any(|e| matches!(e, Entry::Item(..) | Entry::Check(..))), "an older version can't take requests");
         assert_eq!(*find(&menu, "Nap idle"), Entry::Item("Nap idle sessions now".into(), Do::NapAll(vec![3])));
         // Results go stale after a minute.
         let (_, menu) = model(&[], &[], &[], &Config::default(), false, Some((0, "settings saved")), NOTE_MS + 1);
@@ -676,11 +709,11 @@ mod tests {
     }
 
     #[test]
-    fn menu_moves_other_sessions_into_ccnap() {
+    fn menu_moves_other_sessions_into_hibernaut() {
         let mut old = session(4, false, "/w/d");
         old["build"] = json!(1);
-        let c = |pid, panel, old_ccnap, wait, cwd: &str| Candidate {
-            pid, session: "S".into(), cwd: cwd.into(), panel, old_ccnap, memory: 1 << 30, wait, shell: None,
+        let c = |pid, panel, old_hibernaut, wait, cwd: &str| Candidate {
+            pid, session: "S".into(), cwd: cwd.into(), panel, old_hibernaut, memory: 1 << 30, wait, shell: None,
         };
         let candidates = [
             c(4, true, true, None, "/w/d"),
@@ -691,19 +724,19 @@ mod tests {
         let leftovers = [(7, 1 << 30, adopt::LEFTOVER), (5, 2 << 30, adopt::LEFTOVER)];
         let (_, menu) = model(&[old.clone()], &leftovers, &candidates, &Config::default(), false, None, 0);
         // One click for all of them; it asks first, as one is in a terminal.
-        assert_eq!(*find(&menu, "Move 3"), Entry::Item("Move 3 sessions into ccnap…".into(), Do::MoveAll));
+        assert_eq!(*find(&menu, "Move 3"), Entry::Item("Move 3 sessions into Hibernaut…".into(), Do::MoveAll));
         assert!(sub(&menu, "● d (old version)").contains(&Entry::Item("Update now (keeps the chat)".into(), Do::MoveIn(4))));
         // A leftover that can move in is listed once, as a session.
-        let outside = sub(&menu, "Outside ccnap (4)");
+        let outside = sub(&menu, "Outside Hibernaut (4)");
         assert!(outside.contains(&Entry::Text("Editor chats move in by themselves once idle.".into())));
-        assert!(sub(outside, "↻ e · editor").contains(&Entry::Item("Move into ccnap (keeps the chat)".into(), Do::MoveIn(7))));
+        assert!(sub(outside, "↻ e · editor").contains(&Entry::Item("Move into Hibernaut (keeps the chat)".into(), Do::MoveIn(7))));
         assert!(sub(outside, "↻ g").contains(&Entry::Text("Can move in once idle (claude is working)".into())));
         assert_eq!(outside.iter().filter(|e| matches!(e, Entry::Sub(t, _) if t.starts_with('○'))).count(), 1);
         let settings = sub(&menu, "Settings");
         assert!(settings.contains(&Entry::Check("Move other sessions in automatically".into(), true, Do::Set("adopt", "\"off\"".into()))));
-        // Only older ccnaps ready: that's an update.
+        // Only older hibernauts ready: that's an update.
         let (_, menu) = model(&[old], &[], &candidates[..1], &Config::default(), false, None, 0);
-        assert_eq!(*find(&menu, "Update 1"), Entry::Item("Update 1 session to this ccnap".into(), Do::MoveAll));
+        assert_eq!(*find(&menu, "Update 1"), Entry::Item("Update 1 session to the new version".into(), Do::MoveAll));
     }
 
     #[test]
@@ -711,3 +744,4 @@ mod tests {
         icon();
     }
 }
+

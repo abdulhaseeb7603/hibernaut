@@ -1,10 +1,10 @@
 [package]
-name = "ccnap"
+name = "hibernaut"
 version = "0.1.0"
 edition = "2021"
 description = "Puts idle Claude Code sessions to sleep to free RAM, and wakes them the moment you come back"
 license = "MIT"
-repository = "https://github.com/abdulhaseeb7603/ccnap"
+repository = "https://github.com/abdulhaseeb7603/hibernaut"
 readme = "README.md"
 keywords = ["claude", "claude-code", "terminal", "memory", "pty"]
 categories = ["command-line-utilities"]

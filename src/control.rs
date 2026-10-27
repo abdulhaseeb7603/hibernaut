@@ -1,4 +1,4 @@
-//! Acting on running sessions, from the tray or from `ccnap nap|wake|restart`. A request is a
+//! Acting on running sessions, from the tray or from `hibernaut nap|wake|restart`. A request is a
 //! small file the session picks up on its next check, within a second. The session decides
 //! whether the action is safe, so nothing outside it can stop Claude mid-task, and records the
 //! outcome in its status file for whoever asked.
@@ -55,7 +55,7 @@ pub fn outcome(action: Action, result: &str, now: u64) -> Value {
     json!({ "action": action.name(), "result": result, "at": now })
 }
 
-/// `ccnap nap|wake|restart <pid|all>`: asks, then waits for the sessions to answer.
+/// `hibernaut nap|wake|restart <pid|all>`: asks, then waits for the sessions to answer.
 pub fn cli(action: Action, target: &str) -> io::Result<()> {
     let now = now_ms();
     let sessions = status::sessions(now);
@@ -68,8 +68,8 @@ pub fn cli(action: Action, target: &str) -> io::Result<()> {
             .collect(),
         pid => match pid.parse::<u32>() {
             Ok(pid) if sessions.iter().any(|v| v["pid"] == pid) => vec![pid],
-            Ok(pid) => return Err(io::Error::other(format!("no ccnap session with pid {pid}; see `ccnap status`"))),
-            Err(_) => return Err(io::Error::other(format!("usage: ccnap {} <pid|all>", action.name()))),
+            Ok(pid) => return Err(io::Error::other(format!("no hibernaut session with pid {pid}; see `hibernaut status`"))),
+            Err(_) => return Err(io::Error::other(format!("usage: hibernaut {} <pid|all>", action.name()))),
         },
     };
     if pids.is_empty() {
@@ -90,7 +90,7 @@ pub fn cli(action: Action, target: &str) -> io::Result<()> {
             }
             Some(done["result"].as_str().unwrap_or("").to_string())
         });
-        println!("{pid}: {}", answer.unwrap_or_else(|| "no answer (is it an older ccnap? see `ccnap status`)".into()));
+        println!("{pid}: {}", answer.unwrap_or_else(|| "no answer (is it an older version? see `hibernaut status`)".into()));
     }
     Ok(())
 }

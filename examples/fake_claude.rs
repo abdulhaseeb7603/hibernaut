@@ -1,4 +1,4 @@
-//! Stand-in for `claude` in tests/e2e.rs. It fires the hooks ccnap injected the way Claude Code
+//! Stand-in for `claude` in tests/e2e.rs. It fires the hooks hibernaut injected the way Claude Code
 //! would. In a terminal it acts like Claude's prompt: input that arrives while it starts up is
 //! lost, Enter sends the line (`SUBMIT "<line>"`) unless it comes inside a bracketed paste, and
 //! `q` quits. With `--input-format stream-json` it speaks just enough of the Agent SDK protocol,
@@ -28,7 +28,7 @@ fn main() {
     let settings = fs::read_to_string(flag("--settings").expect("--settings")).unwrap();
     let settings: Value = serde_json::from_str(&settings).unwrap();
     let resumed = flag("--resume");
-    // `--session-id`: ccnap bringing back a session nobody had typed in yet.
+    // `--session-id`: hibernaut bringing back a session nobody had typed in yet.
     let fresh = flag("--session-id");
     let session = resumed.clone().or(fresh.clone()).unwrap_or_else(|| "sess-1".into());
     let fresh = fresh.as_deref().unwrap_or("none");
@@ -46,7 +46,7 @@ fn main() {
         });
     }
     // Like Claude, the transcript exists once something was said (or the session is resumed).
-    let transcript = env::temp_dir().join(format!("ccnap-fake-{}.jsonl", std::process::id()));
+    let transcript = env::temp_dir().join(format!("hibernaut-fake-{}.jsonl", std::process::id()));
     if resumed.is_some() {
         fs::write(&transcript, "{}\n").unwrap();
     }
@@ -80,7 +80,7 @@ fn main() {
 
     if flag("--input-format").as_deref() == Some("stream-json") {
         let say = |v: Value| println!("{v}");
-        // Claude Code sends these while idle; ccnap must not count them as activity.
+        // Claude Code sends these while idle; hibernaut must not count them as activity.
         thread::spawn(move || loop {
             say(json!({ "type": "keep_alive" }));
             thread::sleep(Duration::from_millis(300));

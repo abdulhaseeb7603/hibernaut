@@ -1,13 +1,13 @@
-//! ccnap stands between Claude Code and whatever runs it. Once a session has been idle for a
+//! hibernaut stands between Claude Code and whatever runs it. Once a session has been idle for a
 //! while, it stops Claude, which frees all of its memory, MCP servers included, and brings the
 //! session back with `claude --resume` the moment you return. Two ways in:
-//! - a terminal: ccnap runs claude in a pseudo-terminal it owns (tty.rs) and wakes it on focus
+//! - a terminal: hibernaut runs claude in a pseudo-terminal it owns (tty.rs) and wakes it on focus
 //!   or a keypress;
-//! - an editor's chat panel: the extension runs ccnap as its `claudeProcessWrapper`, and ccnap
+//! - an editor's chat panel: the extension runs hibernaut as its `claudeProcessWrapper`, and hibernaut
 //!   relays the Agent SDK's JSON lines (pipe.rs), waking on the next message.
 //!
 //! Claude Code hooks, injected with --settings, say when a turn is really over. The tray icon
-//! (tray.rs, its own `ccnap-tray` program) shows every session and acts on them (control.rs).
+//! (tray.rs, its own `hibernaut-tray` program) shows every session and acts on them (control.rs).
 
 mod adopt;
 mod args;
@@ -27,7 +27,7 @@ pub mod tray;
 #[cfg(not(any(windows, target_os = "macos")))]
 pub mod tray {
     pub fn main() {
-        eprintln!("ccnap-tray: the tray icon is for Windows and macOS for now; use `ccnap status`, `ccnap nap` and `ccnap wake`.");
+        eprintln!("hibernaut-tray: the tray icon is for Windows and macOS for now; use `hibernaut status`, `hibernaut nap` and `hibernaut wake`.");
     }
 }
 
@@ -42,28 +42,28 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const HELP: &str = "ccnap: puts idle Claude Code sessions to sleep to free memory, and wakes them when you return.
+const HELP: &str = "hibernaut: puts idle Claude Code sessions to sleep to free memory, and wakes them when you return.
 
-Use it in place of `claude` (any claude flags work), or run `ccnap setup` once so every
+Use it in place of `claude` (any claude flags work), or run `hibernaut setup` once so every
 terminal and editor chat panel goes through it.
 
-  ccnap setup       route terminals and VS Code-family editors through ccnap
-  ccnap uninstall   undo setup
-  ccnap status      list sessions: awake or napping, why, and the memory they hold or freed
-  ccnap nap <pid|all>      nap a session now (it refuses while Claude works or text is unsent)
-  ccnap wake <pid|all>     wake a napping session now
-  ccnap restart <pid>      restart a session to free leaked memory, conversation kept
-  ccnap adopt [--terminals]  move idle sessions that don't run through ccnap into it (Windows)
-  ccnap config      show where the settings file is, and what it says
-  ccnap version     print ccnap's version (`ccnap --version` prints Claude Code's)
+  hibernaut setup       route terminals and VS Code-family editors through Hibernaut
+  hibernaut uninstall   undo setup
+  hibernaut status      list sessions: awake or napping, why, and the memory they hold or freed
+  hibernaut nap <pid|all>      nap a session now (it refuses while Claude works or text is unsent)
+  hibernaut wake <pid|all>     wake a napping session now
+  hibernaut restart <pid>      restart a session to free leaked memory, conversation kept
+  hibernaut adopt [--terminals]  move idle sessions that don't run through Hibernaut into it (Windows)
+  hibernaut config      show where the settings file is, and what it says
+  hibernaut version     print hibernaut's version (`hibernaut --version` prints Claude Code's)
 
-The tray icon (ccnap-tray, on Windows and macOS) does all of this from a menu.
+The tray icon (hibernaut-tray, on Windows and macOS) does all of this from a menu.
 ";
 
-/// The `ccnap` program.
+/// The `hibernaut` program.
 pub fn run() {
     let mut argv: Vec<OsString> = env::args_os().skip(1).collect();
-    let state_env = env::var_os("CCNAP_STATE");
+    let state_env = env::var_os("HIBERNAUT_STATE");
     // Hooks get their input piped; `claude hook ...` typed in a terminal is a prompt.
     if argv.first().is_some_and(|a| a == "hook") && !io::stdin().is_terminal() {
         if let Some(path) = argv.get(1).cloned().or(state_env) {
@@ -78,7 +78,7 @@ pub fn run() {
             return;
         }
     }
-    // Our own commands, unless we were started as the `claude` that `ccnap setup` puts on PATH.
+    // Our own commands, unless we were started as the `claude` that `hibernaut setup` puts on PATH.
     if !install::invoked_as_claude() {
         let done = |r: io::Result<()>| -> ! { process::exit(report(r)) };
         match argv.first().and_then(|a| a.to_str()) {
@@ -96,22 +96,22 @@ pub fn run() {
                 let (Some(pid), Some(text)) = (argv.get(1).and_then(|a| a.to_str()?.parse().ok()), argv.get(2)) else { process::exit(2) };
                 done(adopt::type_here(pid, &text.to_string_lossy()))
             }
-            Some("version") => done(writeln!(io::stdout(), "ccnap {}", env!("CARGO_PKG_VERSION"))),
+            Some("version") => done(writeln!(io::stdout(), "hibernaut {}", env!("CARGO_PKG_VERSION"))),
             Some("help") => done(write!(io::stdout(), "{HELP}")),
             _ => {}
         }
     }
-    // An editor's claudeProcessWrapper runs `ccnap <path to its claude> <args>`.
+    // An editor's claudeProcessWrapper runs `hibernaut <path to its claude> <args>`.
     let claude = if argv.first().is_some_and(|a| is_claude_exe(Path::new(a))) {
         PathBuf::from(argv.remove(0))
     } else {
         find_claude().unwrap_or_else(|e| {
-            eprintln!("ccnap: {e}");
+            eprintln!("hibernaut: {e}");
             process::exit(127)
         })
     };
     let mut toks = args::parse(&argv);
-    // Already inside a ccnap session (e.g. run from Claude's own shell).
+    // Already inside a hibernaut session (e.g. run from Claude's own shell).
     if state_env.is_some() {
         process::exit(passthrough(&claude, &argv));
     }
@@ -127,7 +127,7 @@ pub fn run() {
     match result {
         Ok(code) => process::exit(code),
         Err(e) => {
-            eprintln!("ccnap: {e}");
+            eprintln!("hibernaut: {e}");
             process::exit(1)
         }
     }
@@ -137,7 +137,7 @@ fn report(r: io::Result<()>) -> i32 {
     match r {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("ccnap: {e}");
+            eprintln!("hibernaut: {e}");
             1
         }
     }
@@ -162,7 +162,7 @@ fn is_claude_exe(p: &Path) -> bool {
 }
 
 fn temp_dir() -> PathBuf {
-    env::temp_dir().join("ccnap")
+    env::temp_dir().join("hibernaut")
 }
 
 /// After a restart for memory, another one may happen only once a sample taken at least this
@@ -171,7 +171,7 @@ fn temp_dir() -> PathBuf {
 const REARM_AFTER_MS: u64 = 10 * 60_000;
 
 /// Per-session temp files: the hook state, the --settings that installs the hooks, and the
-/// status that `ccnap status` reads.
+/// status that `hibernaut status` reads.
 struct Files {
     state: PathBuf,
     settings: PathBuf,
@@ -227,15 +227,20 @@ fn session_cwd(st: &hook::State, started_in: &Path) -> PathBuf {
 }
 
 fn find_claude() -> Result<PathBuf, String> {
-    if let Some(p) = env::var_os("CCNAP_CLAUDE") {
+    if let Some(p) = env::var_os("HIBERNAUT_CLAUDE") {
         return Ok(p.into());
     }
     let me = env::current_exe().and_then(fs::canonicalize).ok();
-    // `ccnap setup` puts a `claude` that is really ccnap in here.
-    let shims = fs::canonicalize(install::bin_dir()).ok();
+    // `hibernaut setup` puts a `claude` that is really hibernaut in here.
+    // A terminal opened before ccnap became hibernaut still has ccnap's on its PATH.
+    let shims: Vec<PathBuf> = [Some(install::bin_dir()), install::legacy_home().map(|h| h.join("bin"))]
+        .into_iter()
+        .flatten()
+        .filter_map(|d| fs::canonicalize(d).ok())
+        .collect();
     let names: &[&str] = if cfg!(windows) { &["claude.exe", "claude.cmd"] } else { &["claude"] };
     for dir in env::split_paths(&env::var_os("PATH").unwrap_or_default()) {
-        if shims.is_some() && fs::canonicalize(&dir).ok() == shims {
+        if fs::canonicalize(&dir).is_ok_and(|d| shims.contains(&d)) {
             continue;
         }
         for name in names {
@@ -252,7 +257,7 @@ fn find_claude() -> Result<PathBuf, String> {
             return Ok(p);
         }
     }
-    Err("can't find `claude` on PATH; set CCNAP_CLAUDE to its full path".into())
+    Err("can't find `claude` on PATH; set HIBERNAUT_CLAUDE to its full path".into())
 }
 
 /// npm installs `claude.cmd`, which runs `"%dp0%\node_modules\...\claude.exe" %*`. A pty needs a
@@ -268,7 +273,7 @@ fn npm_shim_target(shim: &Path) -> Option<PathBuf> {
 fn passthrough(claude: &Path, argv: &[OsString]) -> i32 {
     use std::os::unix::process::CommandExt;
     let e = process::Command::new(claude).args(argv).exec();
-    eprintln!("ccnap: {}: {e}", claude.display());
+    eprintln!("hibernaut: {}: {e}", claude.display());
     127
 }
 
@@ -278,7 +283,7 @@ fn passthrough(claude: &Path, argv: &[OsString]) -> i32 {
     match process::Command::new(claude).args(argv).status() {
         Ok(s) => s.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("ccnap: {}: {e}", claude.display());
+            eprintln!("hibernaut: {}: {e}", claude.display());
             127
         }
     }
@@ -307,11 +312,11 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-/// A trail for "why didn't it nap?": `log` in the settings file, or CCNAP_LOG.
+/// A trail for "why didn't it nap?": `log` in the settings file, or HIBERNAUT_LOG.
 pub(crate) fn log(msg: impl std::fmt::Display) {
     let Some(path) = config::get().log else { return };
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{} ccnap[{}] {msg}", now_ms(), process::id());
+        let _ = writeln!(f, "{} hibernaut[{}] {msg}", now_ms(), process::id());
     }
 }
 
@@ -329,7 +334,7 @@ mod tests {
 
     #[test]
     fn only_executables_count_as_claude() {
-        let dir = env::temp_dir().join(format!("ccnap-exe-test-{}", process::id()));
+        let dir = env::temp_dir().join(format!("hibernaut-exe-test-{}", process::id()));
         fs::create_dir_all(&dir).unwrap();
         for (name, is) in [("CLAUDE.md", false), ("claude.json", false), ("claude", true), ("claude.exe", true)] {
             fs::write(dir.join(name), "").unwrap();
@@ -340,7 +345,7 @@ mod tests {
 
     #[test]
     fn settings_survive_a_cleaned_temp_dir() {
-        let dir = env::temp_dir().join(format!("ccnap-files-test-{}", process::id()));
+        let dir = env::temp_dir().join(format!("hibernaut-files-test-{}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         let files = Files {
             state: dir.join("1.state.json"),

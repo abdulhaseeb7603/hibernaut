@@ -1,6 +1,6 @@
 //! Pipe mode, for the chat panel of VS Code-family editors. With `claudeCode.claudeProcessWrapper`
-//! pointing at ccnap, the extension's Agent SDK runs `ccnap <claude> --input-format stream-json
-//! ...` and talks JSON lines over stdin and stdout. ccnap relays every line unchanged. Once the
+//! pointing at hibernaut, the extension's Agent SDK runs `hibernaut <claude> --input-format stream-json
+//! ...` and talks JSON lines over stdin and stdout. hibernaut relays every line unchanged. Once the
 //! session has been idle long enough it closes claude's input, the way the SDK ends a session,
 //! so claude shuts down and frees its memory. The next line from the SDK wakes it: claude starts
 //! again with `--resume`, and the setup the SDK sent the first time (initialize, then model,
@@ -29,8 +29,8 @@ const REPLAY: &[&str] = &[
     "set_model", "set_permission_mode", "set_max_thinking_tokens",
     "set_mcp_permission_mode_override", "select_chrome_browser", "apply_flag_settings", "mcp_toggle",
 ];
-/// Request ids ccnap uses for replays; their answers are not passed on.
-const OWN_ID: &str = "ccnap-";
+/// Request ids hibernaut uses for replays; their answers are not passed on.
+const OWN_ID: &str = "hibernaut-";
 /// A session past the memory limit naps after this much quiet instead of the full idle time.
 const RECYCLE_QUIET_MS: u64 = 60_000;
 
@@ -152,7 +152,7 @@ pub fn run(claude: PathBuf, toks: Vec<args::Tok>, files: Files) -> io::Result<i3
                 return Ok(exit.code().unwrap_or(1));
             }
         }
-        // A request from the tray or `ccnap nap|wake|restart`: no waiting for idle time, but
+        // A request from the tray or `hibernaut nap|wake|restart`: no waiting for idle time, but
         // the same checks as any nap, so nothing in flight is lost.
         if let Some(action) = control::take() {
             let result = match (action, live.is_some()) {
@@ -209,11 +209,11 @@ pub fn run(claude: PathBuf, toks: Vec<args::Tok>, files: Files) -> io::Result<i3
                 p.nap(live.take().unwrap());
             }
         }
-        // A newer ccnap was installed. While napping nothing runs, so step aside: a clean exit
+        // A newer hibernaut was installed. While napping nothing runs, so step aside: a clean exit
         // is how a session ends, the extension closes it quietly, and its next message starts
-        // the session again through the new ccnap.
+        // the session again through the new hibernaut.
         if live.is_none() && status.replaced() {
-            log("a newer ccnap is installed; handing the session over to it");
+            log("a newer hibernaut is installed; handing the session over to it");
             return Ok(0);
         }
         let napping = live.is_none();
@@ -236,7 +236,7 @@ impl Pipe {
         let mut cmd = Command::new(&self.claude);
         cmd.args(argv)
             .current_dir(cwd)
-            .env("CCNAP_STATE", &self.files.state)
+            .env("HIBERNAUT_STATE", &self.files.state)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());

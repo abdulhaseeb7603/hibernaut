@@ -1,4 +1,4 @@
-//! The hook half of ccnap. Claude Code runs `ccnap hook <state-file>` on session events (we
+//! The hook half of hibernaut. Claude Code runs `hibernaut hook <state-file>` on session events (we
 //! inject the hooks with --settings), and the wrapper reads that file to learn whether Claude
 //! is in the middle of a turn.
 
@@ -61,7 +61,7 @@ pub fn read(path: &Path) -> Option<State> {
     })
 }
 
-/// `ccnap hook`. Never prints and never fails: stdout from some hooks becomes Claude's
+/// `hibernaut hook`. Never prints and never fails: stdout from some hooks becomes Claude's
 /// context, and a broken hook must not get in the user's way.
 pub fn run(path: &Path, now: u64) {
     let mut input = String::new();
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn empty_sessions_come_back_fresh_and_saved_ones_resume() {
-        let dir = std::env::temp_dir().join(format!("ccnap-hook-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("hibernaut-hook-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let transcript = dir.join("t.jsonl");
         let at = |v: Value| {
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn settings_merge_into_user_settings() {
         let user = json!({"model": "opus", "hooks": {"Stop": [{"hooks": []}]}});
-        let s = settings(Path::new("/bin/ccnap"), Path::new("/tmp/1.json"), Some(user));
+        let s = settings(Path::new("/bin/hibernaut"), Path::new("/tmp/1.json"), Some(user));
         assert_eq!(s["model"], "opus");
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 2);
         assert_eq!(s["hooks"]["Notification"][0]["matcher"], "idle_prompt");

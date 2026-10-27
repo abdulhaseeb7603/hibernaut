@@ -1,4 +1,4 @@
-//! Settings: `config.toml` in ccnap's home, overridden by CCNAP_* environment variables. The
+//! Settings: `config.toml` in hibernaut's home, overridden by HIBERNAUT_* environment variables. The
 //! file is read again whenever it changes, so edits apply to sessions that are already running.
 
 use crate::{install, parse_duration};
@@ -13,7 +13,7 @@ use std::{
 pub const DEFAULT_IDLE_MS: u64 = 10 * 60_000;
 pub const DEFAULT_MEMORY_LIMIT: u64 = 2 << 30;
 
-pub const TEMPLATE: &str = r#"# ccnap settings. Edits apply to running sessions within a few seconds.
+pub const TEMPLATE: &str = r#"# hibernaut settings. Edits apply to running sessions within a few seconds.
 
 # How long a session sits untouched before it naps: "90s", "10m", "1h".
 idle = "10m"
@@ -25,13 +25,13 @@ memory_limit = "2GB"
 # Sessions working in these folders never nap or restart.
 exclude_dirs = []
 
-# Claude sessions that don't run through ccnap yet (started before it was installed, or on an
-# older ccnap) move into it once idle, in editor chat panels: "auto", or "off" to move them
+# Claude sessions that don't run through Hibernaut yet (started before it was installed, or on an
+# older hibernaut) move into it once idle, in editor chat panels: "auto", or "off" to move them
 # only from the tray menu.
 adopt = "auto"
 
 # Log every decision here, to see why a session stayed awake.
-# log = "~/ccnap.log"
+# log = "~/hibernaut.log"
 "#;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,7 +41,7 @@ pub struct Config {
     pub memory_limit: u64,
     pub exclude_dirs: Vec<PathBuf>,
     pub log: Option<PathBuf>,
-    /// Move idle sessions that don't run through ccnap into it, without being asked.
+    /// Move idle sessions that don't run through Hibernaut into it, without being asked.
     pub adopt: bool,
 }
 
@@ -136,19 +136,19 @@ pub fn get() -> Config {
         }
     }
     let mut c = fs::read_to_string(path()).map(|t| parse(&t)).unwrap_or_default();
-    for (key, var) in [("idle", "CCNAP_IDLE"), ("memory_limit", "CCNAP_MEMORY_LIMIT"), ("log", "CCNAP_LOG")] {
+    for (key, var) in [("idle", "HIBERNAUT_IDLE"), ("memory_limit", "HIBERNAUT_MEMORY_LIMIT"), ("log", "HIBERNAUT_LOG")] {
         if let Ok(v) = env::var(var) {
             apply(&mut c, key, &Value::String(v));
         }
     }
-    if let Some(dirs) = env::var_os("CCNAP_EXCLUDE") {
+    if let Some(dirs) = env::var_os("HIBERNAUT_EXCLUDE") {
         c.exclude_dirs = env::split_paths(&dirs).collect();
     }
     *CURRENT.write().unwrap() = Some((mtime, c.clone()));
     c
 }
 
-/// The part of TOML ccnap needs: `key = value` lines whose value is a string, a number, or an
+/// The part of TOML hibernaut needs: `key = value` lines whose value is a string, a number, or an
 /// array of strings, which may run over several lines. Unknown keys and lines are skipped.
 pub fn parse(text: &str) -> Config {
     let mut c = Config::default();
@@ -272,23 +272,23 @@ mod tests {
     fn reads_the_template_and_overrides() {
         assert_eq!(parse(TEMPLATE), Config::default());
         let c = parse(
-            "idle = \"90s\" # short\nmemory_limit = 1.5\nexclude_dirs = [\"~/secret\", \"/tmp/x\"]\nlog = /tmp/ccnap.log\n[ignored]\nnonsense",
+            "idle = \"90s\" # short\nmemory_limit = 1.5\nexclude_dirs = [\"~/secret\", \"/tmp/x\"]\nlog = /tmp/hibernaut.log\n[ignored]\nnonsense",
         );
         assert_eq!(c.idle_ms, 90_000);
         assert_eq!(c.memory_limit, 3 << 19);
         assert_eq!(c.exclude_dirs[1], PathBuf::from("/tmp/x"));
         assert!(c.exclude_dirs[0].ends_with("secret"));
-        assert_eq!(c.log, Some(PathBuf::from("/tmp/ccnap.log")));
+        assert_eq!(c.log, Some(PathBuf::from("/tmp/hibernaut.log")));
         assert_eq!(parse("idle_minutes = 30").idle_ms, 30 * 60_000);
         assert_eq!(parse("memory_limit = \"off\"").memory_limit, 0);
     }
 
     #[test]
     fn reads_multi_line_arrays_and_literal_strings() {
-        let c = parse("exclude_dirs = [\n  \"~/a\", # mine\n  'C:\\work',\n]\nlog = 'C:\\logs\\ccnap.log'\nidle = \"5m\"\n");
+        let c = parse("exclude_dirs = [\n  \"~/a\", # mine\n  'C:\\work',\n]\nlog = 'C:\\logs\\hibernaut.log'\nidle = \"5m\"\n");
         assert_eq!(c.exclude_dirs.len(), 2);
         assert_eq!(c.exclude_dirs[1], PathBuf::from(r"C:\work"));
-        assert_eq!(c.log, Some(PathBuf::from(r"C:\logs\ccnap.log")));
+        assert_eq!(c.log, Some(PathBuf::from(r"C:\logs\hibernaut.log")));
         assert_eq!(c.idle_ms, 5 * 60_000);
         assert_eq!(parse(r#"exclude_dirs = ["a", "b",]"#).exclude_dirs.len(), 2);
         // Not valid TOML, but the obvious way to write a Windows path.

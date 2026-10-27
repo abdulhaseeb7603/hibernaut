@@ -84,7 +84,7 @@ mod imp {
         }
     }
 
-    /// Gives ccnap's own pages back to Windows while it waits; they fault back in on wake.
+    /// Gives hibernaut's own pages back to Windows while it waits; they fault back in on wake.
     pub fn trim_self() {
         unsafe { K32EmptyWorkingSet(GetCurrentProcess()) };
     }

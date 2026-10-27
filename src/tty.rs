@@ -1,4 +1,4 @@
-//! Terminal mode: claude runs in a pseudo-terminal ccnap owns. ccnap watches keystrokes and the
+//! Terminal mode: claude runs in a pseudo-terminal hibernaut owns. hibernaut watches keystrokes and the
 //! terminal's focus reports, naps the session once it is idle and out of sight, and wakes it on
 //! focus or a keypress, replaying what was typed. It also restarts a session that has grown
 //! past the memory limit, labels napping tabs with 💤, and hands Ctrl+Z to the shell on Unix.
@@ -88,8 +88,8 @@ impl Wrapper {
         let (mut last_check, mut last_measure, mut since) = (0, 0, now_ms());
         let mut awake_because = None;
         // Keys typed since a wake, held until the new claude is ready for them.
-        // An older ccnap that handed this session over passes on the keys that woke it.
-        let mut replay: Option<(Vec<u8>, u64)> = env::var("CCNAP_TYPED").ok().and_then(|h| unhex(&h)).map(|k| (k, now_ms()));
+        // An older hibernaut that handed this session over passes on the keys that woke it.
+        let mut replay: Option<(Vec<u8>, u64)> = env::var("HIBERNAUT_TYPED").ok().and_then(|h| unhex(&h)).map(|k| (k, now_ms()));
         // Memory of claude's process tree; what the last nap freed; whether a restart for memory
         // may happen, and when a sample may allow one again after a restart (see REARM_AFTER_MS).
         let (mut memory, mut freed, mut armed, mut rearm_at) = (0u64, 0u64, true, 0u64);
@@ -118,7 +118,7 @@ impl Wrapper {
                         }
                         (Some(l), None) => send(l, if self.shared.wants_focus.load(Relaxed) { &k.with_focus } else { &k.rest }),
                         (None, _) if (!k.keys.is_empty() || k.focus == Some(true)) && status.replaced() => {
-                            // A newer ccnap is installed: it takes the session from here.
+                            // A newer hibernaut is installed: it takes the session from here.
                             return self.hand_over(raw, (&reader, &keys), &st, k.keys, status.exe());
                         }
                         (None, _) if !k.keys.is_empty() || k.focus == Some(true) => {
@@ -171,7 +171,7 @@ impl Wrapper {
                 log(format_args!("state {s:?}"));
                 st = s;
             }
-            // A request from the tray or `ccnap nap|wake|restart`. Unlike a nap on its own, it
+            // A request from the tray or `hibernaut nap|wake|restart`. Unlike a nap on its own, it
             // doesn't wait for idle time or focus, but it never loses anything either.
             if let Some(action) = control::take() {
                 let result = match (action, live.is_some()) {
@@ -185,7 +185,7 @@ impl Wrapper {
                         }
                         None => {
                             self.stop(live.take().unwrap());
-                            live = Some(self.wake(&st, Some("restarted from ccnap. The conversation is unchanged."))?);
+                            live = Some(self.wake(&st, Some("restarted on request. The conversation is unchanged."))?);
                             replay = Some((Vec::new(), now));
                             (memory, since) = (0, now);
                             "restarted".into()
@@ -193,7 +193,7 @@ impl Wrapper {
                     },
                     (Action::Nap, false) => "already napping".into(),
                     (Action::Wake | Action::Restart, false) => {
-                        live = Some(self.wake(&st, Some("woken from ccnap"))?);
+                        live = Some(self.wake(&st, Some("woken on request"))?);
                         replay = Some((Vec::new(), now));
                         // Ready when you get there, not napping again a moment later.
                         (act.last_input, since) = (now, now);
@@ -229,7 +229,7 @@ impl Wrapper {
                     (armed, rearm_at) = (false, now + REARM_AFTER_MS);
                     log(format_args!("restarting: claude grew to {}", status::size(memory)));
                     self.stop(live.take().unwrap());
-                    let note = format!("Claude had grown to {}, so ccnap restarted it. The conversation is unchanged.", status::size(memory));
+                    let note = format!("Claude had grown to {}, so Hibernaut restarted it. The conversation is unchanged.", status::size(memory));
                     live = Some(self.wake(&st, Some(&note))?);
                     replay = Some((Vec::new(), now));
                     memory = 0;
@@ -256,8 +256,8 @@ impl Wrapper {
         let mut cmd = CommandBuilder::new(&self.claude);
         cmd.args(argv);
         cmd.cwd(cwd);
-        cmd.env("CCNAP_STATE", &self.files.state);
-        cmd.env_remove("CCNAP_TYPED");
+        cmd.env("HIBERNAUT_STATE", &self.files.state);
+        cmd.env_remove("HIBERNAUT_TYPED");
         let child = slave.spawn_command(cmd).map_err(io::Error::other)?;
         drop(slave);
         log(format_args!("claude pid {:?}", child.process_id()));
@@ -291,7 +291,7 @@ impl Wrapper {
             s.extend_from_slice(format!("\x1b[23;0t\x1b]0;{title}\x07").as_bytes());
         }
         if let Some(note) = note {
-            s.extend_from_slice(format!("\x1b[2m[ccnap] {note}\x1b[0m\r\n").as_bytes());
+            s.extend_from_slice(format!("\x1b[2m[hibernaut] {note}\x1b[0m\r\n").as_bytes());
         }
         out(&s);
         let how = st.comeback().unwrap_or(hook::Comeback::Resume);
@@ -309,7 +309,7 @@ impl Wrapper {
         }
         let freed = if freed > 0 { format!(" ({} freed)", status::size(freed)) } else { String::new() };
         s.extend_from_slice(
-            format!("\r\n\x1b[2m[ccnap] napping: Claude is stopped to save memory{freed}. Focus this tab or start typing to resume.\x1b[0m\r\n")
+            format!("\r\n\x1b[2m[hibernaut] napping: Claude is stopped to save memory{freed}. Focus this tab or start typing to resume.\x1b[0m\r\n")
                 .as_bytes(),
         );
         out(&s);
@@ -324,7 +324,7 @@ impl Wrapper {
 
     /// Stops claude and everything it started (MCP servers, shells), then undoes what it may
     /// have left on in the terminal.
-    /// Passes this napping session to the newer ccnap installed at `exe`, which resumes it and
+    /// Passes this napping session to the newer hibernaut installed at `exe`, which resumes it and
     /// types in the keys that woke this one. On Unix it replaces this process; on Windows this
     /// one waits for it, so the terminal sees one program throughout.
     fn hand_over(
@@ -335,7 +335,7 @@ impl Wrapper {
         #[cfg_attr(unix, allow(unused_mut))] mut typed: Vec<u8>,
         exe: &str,
     ) -> io::Result<i32> {
-        log(format_args!("a newer ccnap is installed; handing session {} to it", st.session_id));
+        log(format_args!("a newer hibernaut is installed; handing session {} to it", st.session_id));
         #[cfg(windows)]
         {
             term::stop_reader(reader);
@@ -347,9 +347,9 @@ impl Wrapper {
         let mut cmd = std::process::Command::new(exe);
         cmd.args(args::resume(&self.toks, &st.session_id, &st.mode, how))
             .current_dir(session_cwd(st, &self.cwd))
-            .env("CCNAP_TYPED", hex(&typed))
-            .env_remove("CCNAP_STATE");
-        drop(raw); // the new ccnap sets the terminal up its own way
+            .env("HIBERNAUT_TYPED", hex(&typed))
+            .env_remove("HIBERNAUT_STATE");
+        drop(raw); // the new hibernaut sets the terminal up its own way
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -387,7 +387,7 @@ impl Wrapper {
             s.extend_from_slice(b"\x1b[?1049l");
         }
         // Colors, hidden cursor, mouse reports and kitty keyboard mode off. Focus reports and
-        // bracketed paste on: ccnap reads them while Claude is gone, and a paste typed in after
+        // bracketed paste on: hibernaut reads them while Claude is gone, and a paste typed in after
         // a wake must stay one paste, not a prompt per line.
         s.extend_from_slice(b"\x1b[0m\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[<u\x1b[?1004h\x1b[?2004h");
         out(&s);
@@ -417,7 +417,7 @@ fn send(l: &mut Live, bytes: &[u8]) {
     }
 }
 
-/// Keys passed to a newer ccnap in an environment variable.
+/// Keys passed to a newer hibernaut in an environment variable.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -633,7 +633,7 @@ fn tokens(b: &[u8]) -> Vec<(Kind, Range<usize>)> {
 /// One chunk of terminal input, sorted out.
 #[derive(Debug, Default)]
 struct Keys {
-    /// What Claude gets: everything but focus reports, and Ctrl+Z on Unix (ccnap handles it).
+    /// What Claude gets: everything but focus reports, and Ctrl+Z on Unix (hibernaut handles it).
     rest: Vec<u8>,
     /// `rest` with focus reports, for a Claude that asked for them.
     with_focus: Vec<u8>,
@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn naps_only_when_idle_unseen_and_quiet() {
-        let transcript = env::temp_dir().join(format!("ccnap-test-{}.jsonl", process::id()));
+        let transcript = env::temp_dir().join(format!("hibernaut-test-{}.jsonl", process::id()));
         fs::write(&transcript, "").unwrap();
         let st = hook::State {
             state: "idle".into(),

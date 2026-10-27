@@ -40,11 +40,11 @@ jobs:
       - shell: bash
         run: |
           ext=""; [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
-          cp "target/${{ matrix.target }}/release/ccnap$ext" "ccnap-${{ matrix.target }}$ext"
+          cp "target/${{ matrix.target }}/release/hibernaut$ext" "hibernaut-${{ matrix.target }}$ext"
           # The tray icon is for Windows and macOS for now.
-          [[ "${{ matrix.target }}" == *linux* ]] || cp "target/${{ matrix.target }}/release/ccnap-tray$ext" "ccnap-tray-${{ matrix.target }}$ext"
+          [[ "${{ matrix.target }}" == *linux* ]] || cp "target/${{ matrix.target }}/release/hibernaut-tray$ext" "hibernaut-tray-${{ matrix.target }}$ext"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            ccnap-${{ matrix.target }}*
-            ccnap-tray-${{ matrix.target }}*
+            hibernaut-${{ matrix.target }}*
+            hibernaut-tray-${{ matrix.target }}*
