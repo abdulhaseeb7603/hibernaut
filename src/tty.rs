@@ -99,6 +99,9 @@ impl Wrapper {
                 Ok(Some(bytes)) => {
                     let now = now_ms();
                     let k = scan_keys(&bytes);
+                    // TEMPORARY (CI diagnosis): the shape of each input chunk, letters masked.
+                    let shape: String = String::from_utf8_lossy(&bytes).chars().map(|c| if c.is_alphabetic() { 'x' } else { c }).collect();
+                    log(format_args!("input {} bytes, {} as keys: {shape:?}", bytes.len(), k.keys.len()));
                     if let Some(f) = k.focus {
                         (act.focus_known, act.focused, act.last_focus) = (true, f, now);
                         log(format_args!("focus {}", if f { "in" } else { "out" }));
