@@ -350,15 +350,24 @@ fn ccnap(args: &[&str]) -> String {
 #[test]
 fn menu_actions_nap_wake_and_restart_a_terminal_session() {
     // A long idle time and the tab in focus: nothing naps unless asked to.
-    let t = Term::start(&[("CCNAP_IDLE", "1h")]);
+    let dir = scratch("menu-terminal");
+    let log = dir.join("ccnap.log");
+    let t = Term::start(&[("CCNAP_IDLE", "1h"), ("CCNAP_LOG", log.to_str().unwrap())]);
     t.wait_for("FAKE READY resume=none", 1);
     t.send(b"\x1b[I");
     let pid = t.child.process_id().unwrap().to_string();
     t.send(b"abc");
     // Ask only once ccnap has seen the text, which a slow machine takes a while to pass on.
     let start = Instant::now();
-    while !ccnap(&["status"]).contains("unsent text") {
-        assert!(start.elapsed() < Duration::from_secs(15), "the typed text never showed in the status");
+    loop {
+        let status = ccnap(&["status"]);
+        if status.contains("unsent text") {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(15) {
+            let screen = t.screen.lock().unwrap().clone();
+            panic!("the typed text never showed in the status:\n{status}\nlog:\n{}\nscreen:\n{screen:?}", fs::read_to_string(&log).unwrap_or_default());
+        }
         thread::sleep(Duration::from_millis(200));
     }
     let refused = ccnap(&["nap", &pid]);
